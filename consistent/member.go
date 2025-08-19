@@ -5,20 +5,11 @@ import (
 	"strings"
 )
 
-// GatewayMember gateway member implementation
+// GatewayMember .
 type GatewayMember struct {
-	ID   string // Gateway instance ID
-	Host string // Host address
-	Port int    // Port number
-}
-
-// Clone create deep copy of member, ensure concurrent safety
-func (g *GatewayMember) Clone() Member {
-	return &GatewayMember{
-		ID:   g.ID,
-		Host: g.Host,
-		Port: g.Port,
-	}
+	ID   string
+	Host string
+	Port int
 }
 
 // NewGatewayMember create new gateway member
@@ -30,7 +21,16 @@ func NewGatewayMember(id, host string, port int) *GatewayMember {
 	}
 }
 
-// String return string representation of member
+// Clone creates and returns a deep copy of the GatewayMember as a Member.
+func (g *GatewayMember) Clone() Member {
+	return &GatewayMember{
+		ID:   g.ID,
+		Host: g.Host,
+		Port: g.Port,
+	}
+}
+
+// String returns the string representation of GatewayMember in the form "ID:Host:Port".
 func (g *GatewayMember) String() string {
 	var builder strings.Builder
 	portStr := strconv.Itoa(g.Port)
@@ -58,7 +58,7 @@ func (g *GatewayMember) GetPort() int {
 	return g.Port
 }
 
-// GetAddress get complete address
+// GetAddress returns the network address of the GatewayMember in the form "Host:Port".
 func (g *GatewayMember) GetAddress() string {
 	var builder strings.Builder
 	portStr := strconv.Itoa(g.Port)
