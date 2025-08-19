@@ -350,54 +350,62 @@ func (c *Consistent) LocateKey(key []byte) Member {
 	return c.GetPartitionOwner(partID)
 }
 
-// getClosestN gets the N closest members (internal method).
+// getClosestN gets the N closest members (internal method) - optimized version.
 func (c *Consistent) getClosestN(partID, count int) ([]Member, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	var res []Member
 	if count > len(c.members) {
-		return res, ErrInsufficientMemberCount
+		return nil, ErrInsufficientMemberCount
 	}
 
-	var ownerKey uint64
-	owner := c.getPartitionOwner(partID)
-	// Hash and sort all names.
-	var keys []uint64
-	kmems := make(map[uint64]Member)
-	for name, member := range c.members {
-		key := c.hasher.Sum64([]byte(name))
-		if name == owner.String() {
-			ownerKey = key
-		}
-		keys = append(keys, key)
-		kmems[key] = member
+	if len(c.sortedSet) == 0 {
+		return nil, ErrInsufficientMemberCount
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		return keys[i] < keys[j]
+
+	// Get the partition owner to determine the starting key
+	owner := c.getPartitionOwner(partID)
+	if owner == nil {
+		return nil, ErrInsufficientMemberCount
+	}
+
+	// Hash the owner's name to find the starting position
+	ownerKey := c.hasher.Sum64([]byte(owner.String()))
+
+	// Use binary search to find the starting position in the sorted ring
+	startIdx := sort.Search(len(c.sortedSet), func(i int) bool {
+		return c.sortedSet[i] >= ownerKey
 	})
 
-	// Find the owner of the key.
-	idx := 0
-	for idx < len(keys) {
-		if keys[idx] == ownerKey {
-			key := keys[idx]
-			res = append(res, kmems[key])
-			break
-		}
-		idx++
+	// If didn't find an exact match or went past the end, wrap around
+	if startIdx >= len(c.sortedSet) {
+		startIdx = 0
 	}
 
-	// Find the closest (replica owner) members.
-	for len(res) < count {
+	// Collect unique members by traversing the ring clockwise
+	result := make([]Member, 0, count)
+	seen := make(map[string]struct{})
+	idx := startIdx
+
+	for len(result) < count && len(seen) < len(c.members) {
+		hash := c.sortedSet[idx]
+		member := c.ring[hash]
+		memberKey := member.String()
+
+		// Add member if haven't seen it before
+		if _, exists := seen[memberKey]; !exists {
+			result = append(result, member)
+			seen[memberKey] = struct{}{}
+		}
+
+		// Move to next virtual node (with wraparound)
 		idx++
-		if idx >= len(keys) {
+		if idx >= len(c.sortedSet) {
 			idx = 0
 		}
-		key := keys[idx]
-		res = append(res, kmems[key])
 	}
-	return res, nil
+
+	return result, nil
 }
 
 // GetClosestN returns the N members closest to the key in the hash ring.
