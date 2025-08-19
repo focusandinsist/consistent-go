@@ -45,6 +45,7 @@ type Hasher interface {
 // Member represents a member in the consistent hash ring.
 type Member interface {
 	String() string
+	Clone() Member
 }
 
 // Config represents the configuration that controls the consistent hashing package.
@@ -148,34 +149,40 @@ func (c *Consistent) GetMembers() []Member {
 	// First, try to check the cache with a read lock.
 	c.mu.RLock()
 	if !c.membersDirty && c.cachedMembers != nil {
-		// Cache is valid, safely return a copy under the read lock.
+		// Cache is valid, safely return cloned copies under the read lock.
 		res := make([]Member, len(c.cachedMembers))
-		copy(res, c.cachedMembers)
+		for i, member := range c.cachedMembers {
+			res[i] = member.Clone()
+		}
 		c.mu.RUnlock()
 		return res
 	}
-	c.mu.RUnlock() // Release the read lock, prepare to acquire the write lock.
+	c.mu.RUnlock()
 
 	// Acquire the write lock to update the cache.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// After acquiring the write lock, it's possible another goroutine has already updated the cache, so we need to check again.
+	// After acquiring the write lock, check again if cache was updated.
 	if !c.membersDirty && c.cachedMembers != nil {
 		res := make([]Member, len(c.cachedMembers))
-		copy(res, c.cachedMembers)
+		for i, member := range c.cachedMembers {
+			res[i] = member.Clone()
+		}
 		return res
 	}
 
-	// Create a thread-safe copy of the member list.
+	// Create a thread-safe copy of the member list using Clone().
 	members := make([]Member, 0, len(c.members))
 	for _, member := range c.members {
-		members = append(members, member)
+		members = append(members, member.Clone())
 	}
 
-	// Update the cache (safe under the write lock).
-	c.cachedMembers = make([]Member, len(members))
-	copy(c.cachedMembers, members)
+	// Update the cache with original members (not cloned).
+	c.cachedMembers = make([]Member, 0, len(c.members))
+	for _, member := range c.members {
+		c.cachedMembers = append(c.cachedMembers, member)
+	}
 	c.membersDirty = false
 
 	return members

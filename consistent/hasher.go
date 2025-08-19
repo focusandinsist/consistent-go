@@ -3,7 +3,21 @@ package consistent
 import (
 	"hash/crc64"
 	"hash/fnv"
+	"sync"
 )
+
+var (
+	crc64Table *crc64.Table
+	once       sync.Once
+)
+
+// getCRC64Table returns the shared CRC64 table, creating it only once.
+func getCRC64Table() *crc64.Table {
+	once.Do(func() {
+		crc64Table = crc64.MakeTable(crc64.ISO)
+	})
+	return crc64Table
+}
 
 // CRC64Hasher is a hasher that uses the CRC64 algorithm.
 type CRC64Hasher struct {
@@ -13,7 +27,7 @@ type CRC64Hasher struct {
 // NewCRC64Hasher creates a new CRC64 hasher.
 func NewCRC64Hasher() *CRC64Hasher {
 	return &CRC64Hasher{
-		table: crc64.MakeTable(crc64.ISO),
+		table: getCRC64Table(),
 	}
 }
 

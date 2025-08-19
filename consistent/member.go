@@ -1,6 +1,9 @@
 package consistent
 
-import "fmt"
+import (
+	"strconv"
+	"strings"
+)
 
 // GatewayMember gateway member implementation
 type GatewayMember struct {
@@ -10,7 +13,7 @@ type GatewayMember struct {
 }
 
 // Clone create deep copy of member, ensure concurrent safety
-func (g *GatewayMember) Clone() *GatewayMember {
+func (g *GatewayMember) Clone() Member {
 	return &GatewayMember{
 		ID:   g.ID,
 		Host: g.Host,
@@ -29,7 +32,15 @@ func NewGatewayMember(id, host string, port int) *GatewayMember {
 
 // String return string representation of member
 func (g *GatewayMember) String() string {
-	return fmt.Sprintf("%s:%s:%d", g.ID, g.Host, g.Port)
+	var builder strings.Builder
+	portStr := strconv.Itoa(g.Port)
+	builder.Grow(len(g.ID) + len(g.Host) + len(portStr) + 2) // +2 for colons
+	builder.WriteString(g.ID)
+	builder.WriteByte(':')
+	builder.WriteString(g.Host)
+	builder.WriteByte(':')
+	builder.WriteString(portStr)
+	return builder.String()
 }
 
 // GetID get gateway ID
@@ -49,5 +60,11 @@ func (g *GatewayMember) GetPort() int {
 
 // GetAddress get complete address
 func (g *GatewayMember) GetAddress() string {
-	return fmt.Sprintf("%s:%d", g.Host, g.Port)
+	var builder strings.Builder
+	portStr := strconv.Itoa(g.Port)
+	builder.Grow(len(g.Host) + len(portStr) + 1) // +1 for colon
+	builder.WriteString(g.Host)
+	builder.WriteByte(':')
+	builder.WriteString(portStr)
+	return builder.String()
 }
