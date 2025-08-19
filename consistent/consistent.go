@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"sync"
 )
 
@@ -20,6 +21,19 @@ const (
 
 // ErrInsufficientMemberCount is the error returned when the number of members is insufficient.
 var ErrInsufficientMemberCount = errors.New("insufficient number of members")
+
+// ErrInsufficientSpace is the error returned when there's not enough space to distribute partitions.
+var ErrInsufficientSpace = errors.New("not enough space to distribute partitions")
+
+// buildVirtualNodeKey efficiently builds virtual node key, avoiding fmt.Sprintf performance overhead
+func buildVirtualNodeKey(memberStr string, index int) []byte {
+	// Estimate capacity: member string length + number length (max 10 digits)
+	indexStr := strconv.Itoa(index)
+	key := make([]byte, 0, len(memberStr)+len(indexStr))
+	key = append(key, memberStr...)
+	key = append(key, indexStr...)
+	return key
+}
 
 // Hasher generates a 64-bit unsigned hash for a given byte slice.
 // A Hasher should minimize collisions (generating the same hash for different byte slices).
@@ -68,11 +82,32 @@ type Consistent struct {
 	membersDirty  bool
 }
 
-// New creates and returns a new Consistent object.
-func New(members []Member, config Config) *Consistent {
+// validateConfig validates the configuration parameters.
+func validateConfig(memberCount int, config Config) error {
 	if config.Hasher == nil {
-		panic("Hasher cannot be nil")
+		return errors.New("hasher cannot be nil")
 	}
+	if memberCount == 0 {
+		return nil // Empty ring is valid
+	}
+
+	// Check if the configuration can support the required partitions
+	avgLoad := float64(config.PartitionCount) / float64(memberCount) * config.Load
+	maxLoad := math.Ceil(avgLoad)
+
+	// Rough estimation: if average load per member exceeds virtual nodes per member significantly,
+	// it might be difficult to distribute partitions
+	if maxLoad > float64(config.ReplicationFactor)*2 {
+		return fmt.Errorf("configuration may cause distribution issues: partitionCount=%d, memberCount=%d, load=%.2f results in avgLoad=%.2f per member",
+			config.PartitionCount, memberCount, config.Load, maxLoad)
+	}
+
+	return nil
+}
+
+// New creates and returns a new Consistent object.
+func New(members []Member, config Config) (*Consistent, error) {
+	// Set defaults
 	if config.PartitionCount == 0 {
 		config.PartitionCount = DefaultPartitionCount
 	}
@@ -81,6 +116,11 @@ func New(members []Member, config Config) *Consistent {
 	}
 	if config.Load == 0 {
 		config.Load = DefaultLoad
+	}
+
+	// Validate configuration
+	if err := validateConfig(len(members), config); err != nil {
+		return nil, err
 	}
 
 	c := &Consistent{
@@ -96,9 +136,11 @@ func New(members []Member, config Config) *Consistent {
 		c.add(member)
 	}
 	if members != nil {
-		c.distributePartitions()
+		if err := c.distributePartitions(); err != nil {
+			return nil, err
+		}
 	}
-	return c
+	return c, nil
 }
 
 // GetMembers returns a thread-safe copy of the members. It returns an empty Member slice if there are no members.
@@ -107,10 +149,10 @@ func (c *Consistent) GetMembers() []Member {
 	c.mu.RLock()
 	if !c.membersDirty && c.cachedMembers != nil {
 		// Cache is valid, safely return a copy under the read lock.
-		result := make([]Member, len(c.cachedMembers))
-		copy(result, c.cachedMembers)
+		res := make([]Member, len(c.cachedMembers))
+		copy(res, c.cachedMembers)
 		c.mu.RUnlock()
-		return result
+		return res
 	}
 	c.mu.RUnlock() // Release the read lock, prepare to acquire the write lock.
 
@@ -120,9 +162,9 @@ func (c *Consistent) GetMembers() []Member {
 
 	// After acquiring the write lock, it's possible another goroutine has already updated the cache, so we need to check again.
 	if !c.membersDirty && c.cachedMembers != nil {
-		result := make([]Member, len(c.cachedMembers))
-		copy(result, c.cachedMembers)
-		return result
+		res := make([]Member, len(c.cachedMembers))
+		copy(res, c.cachedMembers)
+		return res
 	}
 
 	// Create a thread-safe copy of the member list.
@@ -158,14 +200,15 @@ func (c *Consistent) averageLoad() float64 {
 }
 
 // distributeWithLoad distributes partitions based on load.
-func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]Member, loads map[string]float64) {
+func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]Member, loads map[string]float64) error {
 	avgLoad := c.averageLoad()
 	var count int
 	for {
 		count++
 		if count >= len(c.sortedSet) {
-			// The user needs to reduce the partition count, increase the member count, or increase the load factor.
-			panic("not enough space to distribute partitions")
+			// You need to reduce the partition count, increase the member count, or increase the load factor.
+			return fmt.Errorf("%w: partition %d cannot be assigned after %d attempts (avgLoad=%.2f, members=%d, virtualNodes=%d)",
+				ErrInsufficientSpace, partID, count, avgLoad, len(c.members), len(c.sortedSet))
 		}
 		i := c.sortedSet[idx]
 		member := c.ring[i]
@@ -173,7 +216,7 @@ func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]Memb
 		if load+1 <= avgLoad {
 			partitions[partID] = member
 			loads[member.String()]++
-			return
+			return nil
 		}
 		idx++
 		if idx >= len(c.sortedSet) {
@@ -183,7 +226,7 @@ func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]Memb
 }
 
 // distributePartitions distributes the partitions.
-func (c *Consistent) distributePartitions() {
+func (c *Consistent) distributePartitions() error {
 	loads := make(map[string]float64)
 	partitions := make(map[int]Member)
 
@@ -197,16 +240,19 @@ func (c *Consistent) distributePartitions() {
 		if idx >= len(c.sortedSet) {
 			idx = 0
 		}
-		c.distributeWithLoad(int(partID), idx, partitions, loads)
+		if err := c.distributeWithLoad(int(partID), idx, partitions, loads); err != nil {
+			return err
+		}
 	}
 	c.partitions = partitions
 	c.loads = loads
+	return nil
 }
 
 // add adds a member to the hash ring (internal method).
 func (c *Consistent) add(member Member) {
 	for i := 0; i < c.config.ReplicationFactor; i++ {
-		key := []byte(fmt.Sprintf("%s%d", member.String(), i))
+		key := buildVirtualNodeKey(member.String(), i)
 		h := c.hasher.Sum64(key)
 		c.ring[h] = member
 		c.sortedSet = append(c.sortedSet, h)
@@ -221,18 +267,22 @@ func (c *Consistent) add(member Member) {
 	c.membersDirty = true
 }
 
-// Add adds a new member to the consistent hash ring (optimized version).
-func (c *Consistent) Add(member Member) {
+// Add adds a new member to the consistent hash ring
+func (c *Consistent) Add(member Member) error {
 	// First, check if the member already exists (only needs a read lock).
 	c.mu.RLock()
 	if _, ok := c.members[member.String()]; ok {
 		c.mu.RUnlock()
-		return
+		return nil
 	}
 	c.mu.RUnlock()
 
 	// Calculate the new partition distribution in temporary variables (no lock needed).
-	newPartitions, newLoads := c.calculatePartitionsWithNewMember(member)
+	newPartitions, newLoads, err := c.calculatePartitionsWithNewMember(member)
+	if err != nil {
+		// If pre-calculation fails, do not proceed with adding
+		return fmt.Errorf("failed to add member %s: %w", member.String(), err)
+	}
 
 	// Acquire the write lock to quickly update data structures.
 	c.mu.Lock()
@@ -240,7 +290,7 @@ func (c *Consistent) Add(member Member) {
 
 	// Double-check if the member already exists.
 	if _, ok := c.members[member.String()]; ok {
-		return
+		return nil
 	}
 
 	// Add the member to the ring.
@@ -251,6 +301,8 @@ func (c *Consistent) Add(member Member) {
 	c.loads = newLoads
 	c.members[member.String()] = member
 	c.membersDirty = true
+
+	return nil
 }
 
 // delSlice removes a value from the slice (optimized with binary search).
@@ -267,18 +319,22 @@ func (c *Consistent) delSlice(val uint64) {
 	}
 }
 
-// Remove removes a member from the consistent hash ring (optimized version).
-func (c *Consistent) Remove(name string) {
-	// First, check if the member exists (only needs a read lock).
+// Remove removes a member from the consistent hash ring.
+func (c *Consistent) Remove(name string) error {
+	// First, check if the member exists
 	c.mu.RLock()
 	if _, ok := c.members[name]; !ok {
 		c.mu.RUnlock()
-		return
+		return nil
 	}
 	c.mu.RUnlock()
 
 	// Calculate the partition distribution after removing the member in temporary variables (no lock needed).
-	newPartitions, newLoads := c.calculatePartitionsWithoutMember(name)
+	newPartitions, newLoads, err := c.calculatePartitionsWithoutMember(name)
+	if err != nil {
+		// If pre-calculation fails, do not proceed with removal
+		return fmt.Errorf("failed to remove member %s: %w", name, err)
+	}
 
 	// Acquire the write lock to quickly update data structures.
 	c.mu.Lock()
@@ -286,7 +342,7 @@ func (c *Consistent) Remove(name string) {
 
 	// Double-check if the member exists.
 	if _, ok := c.members[name]; !ok {
-		return
+		return nil
 	}
 
 	// Remove the member from the ring.
@@ -300,11 +356,12 @@ func (c *Consistent) Remove(name string) {
 		// The consistent hash ring is now empty, reset the partition table.
 		c.partitions = make(map[int]Member)
 		c.loads = make(map[string]float64)
-		return
+		return nil
 	}
 
 	c.partitions = newPartitions
 	c.loads = newLoads
+	return nil
 }
 
 // LoadDistribution exposes the load distribution of members.
@@ -340,7 +397,6 @@ func (c *Consistent) getPartitionOwner(partID int) Member {
 	if !ok {
 		return nil
 	}
-	// Return the member directly.
 	return member
 }
 
@@ -350,7 +406,7 @@ func (c *Consistent) LocateKey(key []byte) Member {
 	return c.GetPartitionOwner(partID)
 }
 
-// getClosestN gets the N closest members (internal method) - optimized version.
+// getClosestN gets the N closest members.
 func (c *Consistent) getClosestN(partID, count int) ([]Member, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -383,18 +439,18 @@ func (c *Consistent) getClosestN(partID, count int) ([]Member, error) {
 	}
 
 	// Collect unique members by traversing the ring clockwise
-	result := make([]Member, 0, count)
+	res := make([]Member, 0, count)
 	seen := make(map[string]struct{})
 	idx := startIdx
 
-	for len(result) < count && len(seen) < len(c.members) {
+	for len(res) < count && len(seen) < len(c.members) {
 		hash := c.sortedSet[idx]
 		member := c.ring[hash]
 		memberKey := member.String()
 
 		// Add member if haven't seen it before
 		if _, exists := seen[memberKey]; !exists {
-			result = append(result, member)
+			res = append(res, member)
 			seen[memberKey] = struct{}{}
 		}
 
@@ -405,7 +461,7 @@ func (c *Consistent) getClosestN(partID, count int) ([]Member, error) {
 		}
 	}
 
-	return result, nil
+	return res, nil
 }
 
 // GetClosestN returns the N members closest to the key in the hash ring.
@@ -424,7 +480,7 @@ func (c *Consistent) GetClosestNForPartition(partID, count int) ([]Member, error
 // addToRing only adds a member to the hash ring (without redistributing partitions).
 func (c *Consistent) addToRing(member Member) {
 	for i := 0; i < c.config.ReplicationFactor; i++ {
-		key := []byte(fmt.Sprintf("%s%d", member.String(), i))
+		key := buildVirtualNodeKey(member.String(), i)
 		h := c.hasher.Sum64(key)
 		c.ring[h] = member
 		c.sortedSet = append(c.sortedSet, h)
@@ -436,7 +492,7 @@ func (c *Consistent) addToRing(member Member) {
 }
 
 // calculatePartitionsWithNewMember calculates the partition distribution after adding a new member.
-func (c *Consistent) calculatePartitionsWithNewMember(newMember Member) (map[int]Member, map[string]float64) {
+func (c *Consistent) calculatePartitionsWithNewMember(newMember Member) (map[int]Member, map[string]float64, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -452,7 +508,7 @@ func (c *Consistent) calculatePartitionsWithNewMember(newMember Member) (map[int
 
 	// Add the new member to the temporary ring.
 	for i := 0; i < c.config.ReplicationFactor; i++ {
-		key := []byte(fmt.Sprintf("%s%d", newMember.String(), i))
+		key := buildVirtualNodeKey(newMember.String(), i)
 		h := c.hasher.Sum64(key)
 		tempRing[h] = newMember
 		tempSortedSet = append(tempSortedSet, h)
@@ -465,28 +521,32 @@ func (c *Consistent) calculatePartitionsWithNewMember(newMember Member) (map[int
 
 	// Calculate the new partition distribution, passing the correct number of members.
 	newMemberCount := len(c.members) + 1
-	return c.calculatePartitionsWithRingAndMemberCount(tempRing, tempSortedSet, newMemberCount)
+	partitions, loads, err := c.calculatePartitionsWithRingAndMemberCount(tempRing, tempSortedSet, newMemberCount)
+	if err != nil {
+		return nil, nil, err
+	}
+	return partitions, loads, nil
 }
 
 // removeFromRing only removes a member from the hash ring (without redistributing partitions).
 func (c *Consistent) removeFromRing(name string) {
 	for i := 0; i < c.config.ReplicationFactor; i++ {
-		key := []byte(fmt.Sprintf("%s%d", name, i))
+		key := buildVirtualNodeKey(name, i)
 		h := c.hasher.Sum64(key)
 		delete(c.ring, h)
 		c.delSlice(h)
 	}
 }
 
-// calculatePartitionsWithoutMember calculates the partition distribution after removing a member (optimized version).
-func (c *Consistent) calculatePartitionsWithoutMember(memberName string) (map[int]Member, map[string]float64) {
+// calculatePartitionsWithoutMember calculates the partition distribution after removing a member.
+func (c *Consistent) calculatePartitionsWithoutMember(memberName string) (map[int]Member, map[string]float64, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	// Pre-calculate all hash values of the member to be deleted and store them in a map for quick lookup.
 	hashesToDelete := make(map[uint64]struct{})
 	for i := 0; i < c.config.ReplicationFactor; i++ {
-		key := []byte(fmt.Sprintf("%s%d", memberName, i))
+		key := buildVirtualNodeKey(memberName, i)
 		h := c.hasher.Sum64(key)
 		hashesToDelete[h] = struct{}{}
 	}
@@ -510,16 +570,20 @@ func (c *Consistent) calculatePartitionsWithoutMember(memberName string) (map[in
 	})
 
 	// Calculate the new partition distribution.
-	return c.calculatePartitionsWithRingAndMemberCount(tempRing, tempSortedSet, len(c.members)-1)
+	partitions, loads, err := c.calculatePartitionsWithRingAndMemberCount(tempRing, tempSortedSet, len(c.members)-1)
+	if err != nil {
+		return nil, nil, err
+	}
+	return partitions, loads, nil
 }
 
 // calculatePartitionsWithRingAndMemberCount calculates the partition distribution using the given ring and member count.
-func (c *Consistent) calculatePartitionsWithRingAndMemberCount(ring map[uint64]Member, sortedSet []uint64, memberCount int) (map[int]Member, map[string]float64) {
+func (c *Consistent) calculatePartitionsWithRingAndMemberCount(ring map[uint64]Member, sortedSet []uint64, memberCount int) (map[int]Member, map[string]float64, error) {
 	loads := make(map[string]float64)
 	partitions := make(map[int]Member)
 
 	if memberCount == 0 {
-		return partitions, loads
+		return partitions, loads, nil
 	}
 
 	// Calculate the average load.
@@ -542,7 +606,9 @@ func (c *Consistent) calculatePartitionsWithRingAndMemberCount(ring map[uint64]M
 		for {
 			count++
 			if count >= len(sortedSet) {
-				panic("not enough space to distribute partitions")
+				err := fmt.Errorf("%w: failed to assign partition %d (avgLoad=%.2f, members=%d, virtualNodes=%d)",
+					ErrInsufficientSpace, partID, avgLoad, memberCount, len(sortedSet))
+				return nil, nil, err
 			}
 			i := sortedSet[idx]
 			member := ring[i]
@@ -559,5 +625,5 @@ func (c *Consistent) calculatePartitionsWithRingAndMemberCount(ring map[uint64]M
 		}
 	}
 
-	return partitions, loads
+	return partitions, loads, nil
 }
