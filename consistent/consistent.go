@@ -320,7 +320,9 @@ func (c *Consistent) delSlice(val uint64) {
 }
 
 // Remove removes a member from the consistent hash ring.
-func (c *Consistent) Remove(name string) error {
+func (c *Consistent) Remove(member Member) error {
+	name := member.String()
+
 	// First, check if the member exists
 	c.mu.RLock()
 	if _, ok := c.members[name]; !ok {
@@ -332,7 +334,6 @@ func (c *Consistent) Remove(name string) error {
 	// Calculate the partition distribution after removing the member in temporary variables (no lock needed).
 	newPartitions, newLoads, err := c.calculatePartitionsWithoutMember(name)
 	if err != nil {
-		// If pre-calculation fails, do not proceed with removal
 		return fmt.Errorf("failed to remove member %s: %w", name, err)
 	}
 
@@ -353,7 +354,6 @@ func (c *Consistent) Remove(name string) error {
 	c.membersDirty = true
 
 	if len(c.members) == 0 {
-		// The consistent hash ring is now empty, reset the partition table.
 		c.partitions = make(map[int]Member)
 		c.loads = make(map[string]float64)
 		return nil
