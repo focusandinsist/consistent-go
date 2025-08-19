@@ -57,8 +57,8 @@ type Config struct {
 	// If you have too many keys, choose a large PartitionCount.
 	PartitionCount int
 
-	// Members are replicated on the consistent hash ring. This number represents
-	// how many times a member is replicated on the ring.
+	// Members are replicated on the consistent hash ring.
+	// This number represents how many times a member is replicated on the ring.
 	ReplicationFactor int
 
 	// Load is used to calculate the average load.
@@ -134,7 +134,7 @@ func New(members []Member, config Config) (*Consistent, error) {
 
 	c.hasher = config.Hasher
 	for _, member := range members {
-		c.add(member)
+		c.initMember(member)
 	}
 	if members != nil {
 		if err := c.distributePartitions(); err != nil {
@@ -144,16 +144,21 @@ func New(members []Member, config Config) (*Consistent, error) {
 	return c, nil
 }
 
+// cloneMembers creates a deep copy of the member slice.
+func cloneMembers(members []Member) []Member {
+	res := make([]Member, len(members))
+	for i, m := range members {
+		res[i] = m.Clone()
+	}
+	return res
+}
+
 // GetMembers returns a thread-safe copy of the members. It returns an empty Member slice if there are no members.
 func (c *Consistent) GetMembers() []Member {
 	// First, try to check the cache with a read lock.
 	c.mu.RLock()
 	if !c.membersDirty && c.cachedMembers != nil {
-		// Cache is valid, safely return cloned copies under the read lock.
-		res := make([]Member, len(c.cachedMembers))
-		for i, member := range c.cachedMembers {
-			res[i] = member.Clone()
-		}
+		res := cloneMembers(c.cachedMembers)
 		c.mu.RUnlock()
 		return res
 	}
@@ -165,11 +170,7 @@ func (c *Consistent) GetMembers() []Member {
 
 	// After acquiring the write lock, check again if cache was updated.
 	if !c.membersDirty && c.cachedMembers != nil {
-		res := make([]Member, len(c.cachedMembers))
-		for i, member := range c.cachedMembers {
-			res[i] = member.Clone()
-		}
-		return res
+		return cloneMembers(c.cachedMembers)
 	}
 
 	// Create a thread-safe copy of the member list using Clone().
@@ -256,8 +257,8 @@ func (c *Consistent) distributePartitions() error {
 	return nil
 }
 
-// add adds a member to the hash ring (internal method).
-func (c *Consistent) add(member Member) {
+// initMember adds a member to the hash ring during initialization.
+func (c *Consistent) initMember(member Member) {
 	for i := 0; i < c.config.ReplicationFactor; i++ {
 		key := buildVirtualNodeKey(member.String(), i)
 		h := c.hasher.Sum64(key)
@@ -328,8 +329,11 @@ func (c *Consistent) delSlice(val uint64) {
 
 // Remove removes a member from the consistent hash ring.
 func (c *Consistent) Remove(member Member) error {
-	name := member.String()
+	return c.RemoveByName(member.String())
+}
 
+// RemoveByName removes a member from the consistent hash ring by name.
+func (c *Consistent) RemoveByName(name string) error {
 	// First, check if the member exists
 	c.mu.RLock()
 	if _, ok := c.members[name]; !ok {
@@ -432,7 +436,8 @@ func (c *Consistent) getClosestN(partID, count int) ([]Member, error) {
 		return nil, ErrInsufficientMemberCount
 	}
 
-	// Hash the owner's name to find the starting position
+	// Hash the owner's name to find a starting position on the ring that corresponds to the owner itself.
+	// This ensures the traversal for replicas starts from the primary member.
 	ownerKey := c.hasher.Sum64([]byte(owner.String()))
 
 	// Use binary search to find the starting position in the sorted ring
