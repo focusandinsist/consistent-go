@@ -1,21 +1,15 @@
 package consistent
 
-import "fmt"
+import (
+	"strconv"
+	"strings"
+)
 
-// GatewayMember gateway member implementation
+// GatewayMember .
 type GatewayMember struct {
-	ID   string // Gateway instance ID
-	Host string // Host address
-	Port int    // Port number
-}
-
-// Clone create deep copy of member, ensure concurrent safety
-func (g *GatewayMember) Clone() *GatewayMember {
-	return &GatewayMember{
-		ID:   g.ID,
-		Host: g.Host,
-		Port: g.Port,
-	}
+	ID   string
+	Host string
+	Port int
 }
 
 // NewGatewayMember create new gateway member
@@ -27,9 +21,26 @@ func NewGatewayMember(id, host string, port int) *GatewayMember {
 	}
 }
 
-// String return string representation of member
+// Clone creates and returns a deep copy of the GatewayMember as a Member.
+func (g *GatewayMember) Clone() Member {
+	return &GatewayMember{
+		ID:   g.ID,
+		Host: g.Host,
+		Port: g.Port,
+	}
+}
+
+// String returns the string representation of GatewayMember in the form "ID:Host:Port".
 func (g *GatewayMember) String() string {
-	return fmt.Sprintf("%s:%s:%d", g.ID, g.Host, g.Port)
+	var builder strings.Builder
+	portStr := strconv.Itoa(g.Port)
+	builder.Grow(len(g.ID) + len(g.Host) + len(portStr) + 2) // +2 for colons
+	builder.WriteString(g.ID)
+	builder.WriteByte(':')
+	builder.WriteString(g.Host)
+	builder.WriteByte(':')
+	builder.WriteString(portStr)
+	return builder.String()
 }
 
 // GetID get gateway ID
@@ -47,7 +58,13 @@ func (g *GatewayMember) GetPort() int {
 	return g.Port
 }
 
-// GetAddress get complete address
+// GetAddress returns the network address of the GatewayMember in the form "Host:Port".
 func (g *GatewayMember) GetAddress() string {
-	return fmt.Sprintf("%s:%d", g.Host, g.Port)
+	var builder strings.Builder
+	portStr := strconv.Itoa(g.Port)
+	builder.Grow(len(g.Host) + len(portStr) + 1) // +1 for colon
+	builder.WriteString(g.Host)
+	builder.WriteByte(':')
+	builder.WriteString(portStr)
+	return builder.String()
 }
