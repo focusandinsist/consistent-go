@@ -208,32 +208,51 @@ func (c *Consistent) Add(member Member) error {
 	}
 	c.mu.RUnlock()
 
-	// Calculate the new partition distribution in temporary variables (no lock needed).
-	newPartitions, newLoads, err := c.calculatePartitionsWithNewMember(member)
-	if err != nil {
-		// If pre-calculation fails, do not proceed with adding
-		return fmt.Errorf("failed to add member %s: %w", member.String(), err)
-	}
-
-	// Acquire the write lock to quickly update data structures.
+	// Acquire the write lock to modify the ring structure.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Double-check if the member already exists.
+	// Double-check if the member already exists after acquiring the lock.
 	if _, ok := c.members[member.String()]; ok {
 		return nil
 	}
 
-	// Add the member to the ring.
-	c.addToRing(member)
-
-	// Quickly update partition and load information.
-	c.partitions = newPartitions
-	c.loads = newLoads
+	// Add the member to the ring and partitions incrementally.
 	c.members[member.String()] = member
+	c.addToRing(member)
+	c.remapPartitionsForNewMember(member)
 	c.membersDirty = true
 
 	return nil
+}
+
+// remapPartitionsForNewMember incrementally updates the partition map when a new member is added.
+func (c *Consistent) remapPartitionsForNewMember(member Member) {
+	c.loads[member.String()] = 0
+	bs := make([]byte, 8)
+	for partID := 0; partID < int(c.partitionCount); partID++ {
+		binary.LittleEndian.PutUint64(bs, uint64(partID))
+		key := c.hasher.Sum64(bs)
+
+		idx := sort.Search(len(c.sortedSet), func(i int) bool {
+			return c.sortedSet[i] >= key
+		})
+		if idx >= len(c.sortedSet) {
+			idx = 0
+		}
+
+		newOwner := c.ring[c.sortedSet[idx]]
+
+		// If the new owner is the member just added, update the mapping.
+		if newOwner.String() == member.String() {
+			// If there was a previous owner for this partition, decrement its load.
+			if oldOwner, ok := c.partitions[partID]; ok {
+				c.loads[oldOwner.String()]--
+			}
+			c.partitions[partID] = newOwner
+			c.loads[newOwner.String()]++
+		}
+	}
 }
 
 // Remove removes a member from the consistent hash ring.
@@ -251,12 +270,6 @@ func (c *Consistent) RemoveByName(name string) error {
 	}
 	c.mu.RUnlock()
 
-	// Calculate the partition distribution after removing the member in temporary variables (no lock needed).
-	newPartitions, newLoads, err := c.calculatePartitionsWithoutMember(name)
-	if err != nil {
-		return fmt.Errorf("failed to remove member %s: %w", name, err)
-	}
-
 	// Acquire the write lock to quickly update data structures.
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -270,17 +283,36 @@ func (c *Consistent) RemoveByName(name string) error {
 	c.removeFromRing(name)
 
 	// Quickly update partition and load information.
-	delete(c.members, name)
-	c.membersDirty = true
-
-	if len(c.members) == 0 {
-		c.partitions = make(map[int]Member)
-		c.loads = make(map[string]float64)
-		return nil
+	// find all partitions owned by the member being removed.
+	partitionsToRemap := []int{}
+	for partID, owner := range c.partitions {
+		if owner.String() == name {
+			partitionsToRemap = append(partitionsToRemap, partID)
+		}
 	}
 
-	c.partitions = newPartitions
-	c.loads = newLoads
+	delete(c.loads, name)
+	delete(c.members, name)
+	c.removeFromRing(name)
+
+	// Remap only the affected partitions.
+	for _, partID := range partitionsToRemap {
+		bs := make([]byte, 8)
+		binary.LittleEndian.PutUint64(bs, uint64(partID))
+		key := c.hasher.Sum64(bs)
+
+		idx := sort.Search(len(c.sortedSet), func(i int) bool {
+			return c.sortedSet[i] >= key
+		})
+		if idx >= len(c.sortedSet) {
+			idx = 0
+		}
+		newOwner := c.ring[c.sortedSet[idx]]
+		c.partitions[partID] = newOwner
+		c.loads[newOwner.String()]++
+	}
+
+	c.membersDirty = true
 	return nil
 }
 
@@ -483,133 +515,6 @@ func (c *Consistent) removeFromRing(name string) {
 		delete(c.ring, h)
 		c.delSlice(h)
 	}
-}
-
-// calculatePartitionsWithNewMember calculates the partition distribution after adding a new member.
-func (c *Consistent) calculatePartitionsWithNewMember(newMember Member) (map[int]Member, map[string]float64, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// Create a temporary ring and sorted set.
-	tempRing := make(map[uint64]Member)
-	tempSortedSet := make([]uint64, len(c.sortedSet))
-	copy(tempSortedSet, c.sortedSet)
-
-	// Copy existing members to the temporary ring.
-	for k, v := range c.ring {
-		tempRing[k] = v
-	}
-
-	// Add the new member to the temporary ring.
-	for i := 0; i < c.config.ReplicationFactor; i++ {
-		key := buildVirtualNodeKey(newMember.String(), i)
-		h := c.hasher.Sum64(key)
-		tempRing[h] = newMember
-		tempSortedSet = append(tempSortedSet, h)
-	}
-
-	// Sort the temporary set.
-	sort.Slice(tempSortedSet, func(i int, j int) bool {
-		return tempSortedSet[i] < tempSortedSet[j]
-	})
-
-	// Calculate the new partition distribution, passing the correct number of members.
-	newMemberCount := len(c.members) + 1
-	partitions, loads, err := c.calculatePartitionsWithRingAndMemberCount(tempRing, tempSortedSet, newMemberCount)
-	if err != nil {
-		return nil, nil, err
-	}
-	return partitions, loads, nil
-}
-
-// calculatePartitionsWithoutMember calculates the partition distribution after removing a member.
-func (c *Consistent) calculatePartitionsWithoutMember(memberName string) (map[int]Member, map[string]float64, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// Pre-calculate all hash values of the member to be deleted and store them in a map for quick lookup.
-	hashesToDelete := make(map[uint64]struct{})
-	for i := 0; i < c.config.ReplicationFactor; i++ {
-		key := buildVirtualNodeKey(memberName, i)
-		h := c.hasher.Sum64(key)
-		hashesToDelete[h] = struct{}{}
-	}
-
-	// Create a temporary ring and sorted set.
-	tempRing := make(map[uint64]Member)
-	var tempSortedSet []uint64
-
-	// Iterate through c.ring only once, using the map to quickly check if deletion is needed.
-	for k, v := range c.ring {
-		if _, shouldDelete := hashesToDelete[k]; !shouldDelete {
-			// This node needs to be kept.
-			tempRing[k] = v
-			tempSortedSet = append(tempSortedSet, k)
-		}
-	}
-
-	// Sort the temporary set.
-	sort.Slice(tempSortedSet, func(i int, j int) bool {
-		return tempSortedSet[i] < tempSortedSet[j]
-	})
-
-	// Calculate the new partition distribution.
-	partitions, loads, err := c.calculatePartitionsWithRingAndMemberCount(tempRing, tempSortedSet, len(c.members)-1)
-	if err != nil {
-		return nil, nil, err
-	}
-	return partitions, loads, nil
-}
-
-// calculatePartitionsWithRingAndMemberCount calculates the partition distribution using the given ring and member count.
-func (c *Consistent) calculatePartitionsWithRingAndMemberCount(ring map[uint64]Member, sortedSet []uint64, memberCount int) (map[int]Member, map[string]float64, error) {
-	loads := make(map[string]float64)
-	partitions := make(map[int]Member)
-
-	if memberCount == 0 {
-		return partitions, loads, nil
-	}
-
-	// Calculate the average load.
-	avgLoad := float64(c.partitionCount/uint64(memberCount)) * c.config.Load
-	avgLoad = math.Ceil(avgLoad)
-
-	bs := make([]byte, 8)
-	for partID := uint64(0); partID < c.partitionCount; partID++ {
-		binary.LittleEndian.PutUint64(bs, partID)
-		key := c.hasher.Sum64(bs)
-		idx := sort.Search(len(sortedSet), func(i int) bool {
-			return sortedSet[i] >= key
-		})
-		if idx >= len(sortedSet) {
-			idx = 0
-		}
-
-		// Allocate the partition, considering load balancing.
-		var count int
-		for {
-			count++
-			if count >= len(sortedSet) {
-				err := fmt.Errorf("%w: failed to assign partition %d (avgLoad=%.2f, members=%d, virtualNodes=%d)",
-					ErrInsufficientSpace, partID, avgLoad, memberCount, len(sortedSet))
-				return nil, nil, err
-			}
-			i := sortedSet[idx]
-			member := ring[i]
-			load := loads[member.String()]
-			if load+1 <= avgLoad {
-				partitions[int(partID)] = member
-				loads[member.String()]++
-				break
-			}
-			idx++
-			if idx >= len(sortedSet) {
-				idx = 0
-			}
-		}
-	}
-
-	return partitions, loads, nil
 }
 
 // buildVirtualNodeKey efficiently builds virtual node key, avoiding fmt.Sprintf performance overhead
