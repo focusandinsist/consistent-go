@@ -1,6 +1,7 @@
 package consistent
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -217,7 +218,12 @@ func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]stri
 }
 
 // Add adds a new member to the consistent hash ring
-func (c *Consistent) Add(member string) error {
+func (c *Consistent) Add(ctx context.Context, member string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 	// First, check if the member already exists (only needs a read lock).
 	c.mu.RLock()
 	if _, ok := c.members[member]; ok {
@@ -316,12 +322,17 @@ func (c *Consistent) remapPartitionsForNewMember(member string) {
 }
 
 // Remove removes a member from the consistent hash ring.
-func (c *Consistent) Remove(member string) error {
-	return c.RemoveByName(member)
+func (c *Consistent) Remove(ctx context.Context, member string) error {
+	return c.RemoveByName(ctx, member)
 }
 
 // RemoveByName removes a member from the consistent hash ring by name.
-func (c *Consistent) RemoveByName(name string) error {
+func (c *Consistent) RemoveByName(ctx context.Context, name string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 	// First, check if the member exists
 	c.mu.RLock()
 	if _, ok := c.members[name]; !ok {
@@ -373,34 +384,49 @@ func (c *Consistent) RemoveByName(name string) error {
 }
 
 // LocateKey finds the owner for a given key.
-func (c *Consistent) LocateKey(key []byte) string {
+func (c *Consistent) LocateKey(ctx context.Context, key []byte) string {
+	select {
+	case <-ctx.Done():
+		return ""
+	default:
+	}
 	partID := c.FindPartitionID(key)
-	return c.GetPartitionOwner(partID)
+	return c.GetPartitionOwner(ctx, partID)
 }
 
 // LocateReplicas returns the N members closest to the key in the hash ring.
-func (c *Consistent) LocateReplicas(key []byte, count int) ([]string, error) {
+func (c *Consistent) LocateReplicas(ctx context.Context, key []byte, count int) ([]string, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 	partID := c.FindPartitionID(key)
-	return c.getClosestN(partID, count)
+	return c.getClosestN(ctx, partID, count)
 }
 
 // GetClosestN is an alias for LocateReplicas for backward compatibility.
-func (c *Consistent) GetClosestN(key []byte, count int) ([]string, error) {
-	return c.LocateReplicas(key, count)
+func (c *Consistent) GetClosestN(ctx context.Context, key []byte, count int) ([]string, error) {
+	return c.LocateReplicas(ctx, key, count)
 }
 
 // LocateReplicasForPartition returns the N closest members for a given partition.
-func (c *Consistent) LocateReplicasForPartition(partID, count int) ([]string, error) {
-	return c.getClosestN(partID, count)
+func (c *Consistent) LocateReplicasForPartition(ctx context.Context, partID, count int) ([]string, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	return c.getClosestN(ctx, partID, count)
 }
 
 // GetClosestNForPartition is an alias for LocateReplicasForPartition for backward compatibility.
-func (c *Consistent) GetClosestNForPartition(partID, count int) ([]string, error) {
-	return c.getClosestN(partID, count)
+func (c *Consistent) GetClosestNForPartition(ctx context.Context, partID, count int) ([]string, error) {
+	return c.LocateReplicasForPartition(ctx, partID, count)
 }
 
 // getClosestN gets the N closest members.
-func (c *Consistent) getClosestN(partID, count int) ([]string, error) {
+func (c *Consistent) getClosestN(ctx context.Context, partID, count int) ([]string, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -413,7 +439,7 @@ func (c *Consistent) getClosestN(partID, count int) ([]string, error) {
 	}
 
 	// Get the partition owner to determine the starting key
-	owner := c.getPartitionOwner(partID)
+	owner := c.getPartitionOwner(ctx, partID)
 	if owner == "" {
 		return nil, ErrInsufficientMemberCount
 	}
@@ -464,20 +490,30 @@ func (c *Consistent) FindPartitionID(key []byte) int {
 }
 
 // GetPartitionOwner returns the owner of a given partition.
-func (c *Consistent) GetPartitionOwner(partID int) string {
+func (c *Consistent) GetPartitionOwner(ctx context.Context, partID int) string {
+	select {
+	case <-ctx.Done():
+		return ""
+	default:
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	return c.getPartitionOwner(partID)
+	return c.getPartitionOwner(ctx, partID)
 }
 
 // getPartitionOwner returns the owner of a given partition (not thread-safe).
-func (c *Consistent) getPartitionOwner(partID int) string {
+func (c *Consistent) getPartitionOwner(ctx context.Context, partID int) string {
 	return c.partitions[partID] // Returns empty string if not found
 }
 
 // GetMembers returns a thread-safe copy of the members. It returns an empty Member slice if there are no members.
-func (c *Consistent) GetMembers() []string {
+func (c *Consistent) GetMembers(ctx context.Context) []string {
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
+	}
 	// First, try to check the cache with a read lock.
 	c.mu.RLock()
 	if !c.membersDirty && c.cachedMembers != nil {
@@ -515,7 +551,12 @@ func (c *Consistent) GetMembers() []string {
 }
 
 // LoadDistribution exposes the load distribution of members.
-func (c *Consistent) LoadDistribution() map[string]float64 {
+func (c *Consistent) LoadDistribution(ctx context.Context) map[string]float64 {
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -528,7 +569,12 @@ func (c *Consistent) LoadDistribution() map[string]float64 {
 }
 
 // AverageLoad exposes the current average load.
-func (c *Consistent) AverageLoad() float64 {
+func (c *Consistent) AverageLoad(ctx context.Context) float64 {
+	select {
+	case <-ctx.Done():
+		return 0
+	default:
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
