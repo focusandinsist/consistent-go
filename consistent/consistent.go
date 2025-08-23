@@ -362,21 +362,33 @@ func (c *Consistent) RemoveByName(ctx context.Context, name string) error {
 	delete(c.members, name)
 	c.removeFromRing(name)
 
-	// Remap only the affected partitions.
+	// Remap only the affected partitions with load balancing.
+	avgLoad := c.averageLoad()
+	bs := make([]byte, 8)
 	for _, partID := range partitionsToRemap {
-		bs := make([]byte, 8)
 		binary.LittleEndian.PutUint64(bs, uint64(partID))
 		key := c.hasher.Sum64(bs)
 
+		// Find the theoretical owner's position on the ring.
 		idx := sort.Search(len(c.sortedSet), func(i int) bool {
 			return c.sortedSet[i] >= key
 		})
 		if idx >= len(c.sortedSet) {
 			idx = 0
 		}
-		newOwner := c.ring[c.sortedSet[idx]]
-		c.partitions[partID] = newOwner
-		c.loads[newOwner]++
+
+		// Find a new owner that is not overloaded.
+		// Start searching from the theoretical owner clockwise.
+		for i := 0; i < len(c.sortedSet); i++ {
+			searchIdx := (idx + i) % len(c.sortedSet)
+			newOwner := c.ring[c.sortedSet[searchIdx]]
+
+			if c.loads[newOwner]+1 <= avgLoad {
+				c.partitions[partID] = newOwner
+				c.loads[newOwner]++
+				break // Found a new owner, move to the next partition.
+			}
+		}
 	}
 
 	c.membersDirty = true
