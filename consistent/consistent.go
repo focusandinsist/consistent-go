@@ -450,19 +450,14 @@ func (c *Consistent) getClosestN(ctx context.Context, partID, count int) ([]stri
 		return nil, ErrInsufficientMemberCount
 	}
 
-	// Get the partition owner to determine the starting key
-	owner := c.getPartitionOwner(ctx, partID)
-	if owner == "" {
-		return nil, ErrInsufficientMemberCount
-	}
-
-	// Hash the owner's name to find a starting position on the ring that corresponds to the owner itself.
-	// This ensures the traversal for replicas starts from the primary member.
-	ownerKey := c.hasher.Sum64([]byte(owner))
+	// Hash the partition ID to find its position on the ring.
+	bs := make([]byte, 8)
+	binary.LittleEndian.PutUint64(bs, uint64(partID))
+	partKey := c.hasher.Sum64(bs)
 
 	// Use binary search to find the starting position in the sorted ring
 	startIdx := sort.Search(len(c.sortedSet), func(i int) bool {
-		return c.sortedSet[i] >= ownerKey
+		return c.sortedSet[i] >= partKey
 	})
 
 	// If didn't find an exact match or went past the end, wrap around
