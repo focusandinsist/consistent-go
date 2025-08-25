@@ -62,23 +62,39 @@ type Config struct {
 }
 
 // Consistent holds information about the members of the consistent hash ring.
+// All public methods of this struct are thread-safe.
 type Consistent struct {
 	mu sync.RWMutex
 
-	config              Config
-	hasher              Hasher
-	sortedSet           []uint64
-	partitionCount      uint64
-	loads               map[string]float64
-	members             map[string]struct{}
-	partitions          map[int]string
-	ring                map[uint64]string
-	sortedPartitionKeys []uint64
-	partitionHashes     map[uint64]int
+	// config .
+	config Config
+	// hasher is the specific hash function implementation used for all hashing operations.
+	hasher Hasher
 
-	// Cache-related fields
+	// sortedSet represents the logical hash ring. It's a sorted slice of all virtual node hashes.
+	sortedSet []uint64
+	// ring maps a virtual node hash from sortedSet back to its owner member's name.
+	ring map[uint64]string
+	// members is a set of all unique member names, used for fast O(1) existence checks.
+	members map[string]struct{}
+
+	// partitions is the final mapping of a partition ID to its current owner member.
+	partitions map[int]string
+	// loads tracks the current load (number of assigned partitions) for each member.
+	loads map[string]float64
+
+	// partitionCount is a cached copy of config.PartitionCount as a uint64.
+	partitionCount uint64
+	// partitionHashes maps a pre-computed partition key hash back to its original partition ID (0 to PartitionCount-1).
+	partitionHashes map[uint64]int
+	// sortedPartitionKeys is a pre-computed, sorted slice of all partition key hashes.
+	// This is an optimization that enables efficient incremental rebalancing when adding a new member.
+	sortedPartitionKeys []uint64
+	// cachedMembers is a cached slice of member names for the GetMembers method
+	// to avoid regenerating the list on every call.
 	cachedMembers []string
-	membersDirty  bool
+	// membersDirty is a flag indicating that cachedMembers is out of date and needs to be rebuilt.
+	membersDirty bool
 }
 
 // New creates and returns a new empty Consistent object, ready for dynamic member additions.

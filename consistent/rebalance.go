@@ -79,6 +79,11 @@ func (c *Consistent) Remove(ctx context.Context, member string) error {
 	delete(c.loads, member)
 	delete(c.members, member)
 	c.removeVirtualNodes(member)
+	if len(c.members) == 0 {
+		c.partitions = make(map[int]string)
+		c.membersDirty = true
+		return nil
+	}
 
 	// Remap only the affected partitions with load balancing.
 	avgLoad := c.averageLoad()
