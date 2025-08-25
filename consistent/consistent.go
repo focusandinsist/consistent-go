@@ -12,9 +12,26 @@ import (
 )
 
 const (
-	DefaultPartitionCount    = 271
+	// DefaultPartitionCount is the default number of partitions in the consistent hash ring.
+	// Using a prime number is recommended to help distribute keys more uniformly across partitions
+	// due to the nature of the modulo operation in hashing. This value can be increased for
+	// systems with a very large number of keys to improve key distribution, or decreased
+	// for smaller setups to save memory.
+	// Note: Changing this on a live system will cause a massive reshuffling of keys.
+	DefaultPartitionCount = 271
+
+	// DefaultReplicationFactor is the default number of virtual nodes created for each member.
+	// A higher number leads to a more uniform distribution of partitions to members, which is
+	// especially useful when the number of members is small. However, it increases memory usage
+	// and slows down Add/Remove operations. For a large number of members, this can be decreased.
 	DefaultReplicationFactor = 20
-	DefaultLoad              = 1.25
+
+	// DefaultLoad is the default load factor for balancing partitions.
+	// It determines the maximum load a member can have, calculated as (total partitions / member count) * Load.
+	// A value of 1.25 allows a member's load to be up to 25% higher than the average, providing
+	// flexibility for the distribution algorithm to place all partitions successfully.
+	// Increasing this value may be necessary for small clusters to avoid placement errors(ErrInsufficientSpace).
+	DefaultLoad = 1.25
 )
 
 var (
@@ -66,9 +83,23 @@ type Consistent struct {
 	membersDirty  bool
 }
 
-// New creates and returns a new Consistent object.
-// New creates and returns a new Consistent object with an initial list of members.
-func New(members []string, config Config) (*Consistent, error) {
+// New creates and returns a new empty Consistent object.
+func New(config Config) (*Consistent, error) {
+	return NewWithMembers([]string{}, config)
+}
+
+// NewWithMembers creates and returns a new Consistent object, pre-populated with an initial list of members.
+func NewWithMembers(members []string, config Config) (*Consistent, error) {
+	// Check config
+	if config.PartitionCount < 0 {
+		return nil, errors.New("PartitionCount cannot be negative")
+	}
+	if config.ReplicationFactor < 0 {
+		return nil, errors.New("ReplicationFactor cannot be negative")
+	}
+	if config.Load < 0 {
+		return nil, errors.New("load must be positive")
+	}
 	// Set defaults
 	if config.PartitionCount == 0 {
 		config.PartitionCount = DefaultPartitionCount
@@ -76,7 +107,7 @@ func New(members []string, config Config) (*Consistent, error) {
 	if config.ReplicationFactor == 0 {
 		config.ReplicationFactor = DefaultReplicationFactor
 	}
-	if config.Load == 0 {
+	if config.Load == 0.0 {
 		config.Load = DefaultLoad
 	}
 
@@ -121,11 +152,6 @@ func New(members []string, config Config) (*Consistent, error) {
 	return c, nil
 }
 
-// NewConsistent creates and returns a new empty Consistent object.
-func NewConsistent(config Config) (*Consistent, error) {
-	return New([]string{}, config)
-}
-
 // validateConfig validates the configuration parameters.
 func validateConfig(memberCount int, config Config) error {
 	if config.Hasher == nil {
@@ -142,7 +168,7 @@ func validateConfig(memberCount int, config Config) error {
 	// Rough estimation: if average load per member exceeds virtual nodes per member significantly,
 	// it might be difficult to distribute partitions
 	if maxLoad > float64(config.ReplicationFactor)*2 {
-		return fmt.Errorf("configuration may cause distribution issues: partitionCount=%d, memberCount=%d, load=%.2f results in avgLoad=%.2f per member",
+		return fmt.Errorf("configuration may cause distribution issues: partitionCount=%d, memberCount=%d, load=%g results in avgLoad=%g per member",
 			config.PartitionCount, memberCount, config.Load, maxLoad)
 	}
 
@@ -161,9 +187,9 @@ func (c *Consistent) initMember(member string) {
 	sort.Slice(c.sortedSet, func(i int, j int) bool {
 		return c.sortedSet[i] < c.sortedSet[j]
 	})
-	// Storing members in this map helps find backup members for a partition.
+	// The members map is used for quick, O(1) lookups to check for member existence.
 	c.members[member] = struct{}{}
-	// Mark the member cache as dirty.
+
 	c.membersDirty = true
 }
 
@@ -199,7 +225,7 @@ func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]stri
 		count++
 		if count >= len(c.sortedSet) {
 			// You need to reduce the partition count, increase the member count, or increase the load factor.
-			return fmt.Errorf("%w: partition %d cannot be assigned after %d attempts (avgLoad=%.2f, members=%d, virtualNodes=%d)",
+			return fmt.Errorf("%w: partition %d cannot be assigned after %d attempts (avgLoad=%g, members=%d, virtualNodes=%d)",
 				ErrInsufficientSpace, partID, count, avgLoad, len(c.members), len(c.sortedSet))
 		}
 		i := c.sortedSet[idx]
@@ -323,19 +349,14 @@ func (c *Consistent) remapPartitionsForNewMember(member string) {
 
 // Remove removes a member from the consistent hash ring.
 func (c *Consistent) Remove(ctx context.Context, member string) error {
-	return c.RemoveByName(ctx, member)
-}
-
-// RemoveByName removes a member from the consistent hash ring by name.
-func (c *Consistent) RemoveByName(ctx context.Context, name string) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-	// First, check if the member exists
+	// Check if the member exists
 	c.mu.RLock()
-	if _, ok := c.members[name]; !ok {
+	if _, ok := c.members[member]; !ok {
 		c.mu.RUnlock()
 		return nil
 	}
@@ -346,21 +367,21 @@ func (c *Consistent) RemoveByName(ctx context.Context, name string) error {
 	defer c.mu.Unlock()
 
 	// Double-check if the member exists.
-	if _, ok := c.members[name]; !ok {
+	if _, ok := c.members[member]; !ok {
 		return nil
 	}
 
-	// First, find all partitions owned by the member being removed.
+	// Find all partitions owned by the member being removed.
 	partitionsToRemap := []int{}
 	for partID, owner := range c.partitions {
-		if owner == name {
+		if owner == member {
 			partitionsToRemap = append(partitionsToRemap, partID)
 		}
 	}
 
-	delete(c.loads, name)
-	delete(c.members, name)
-	c.removeFromRing(name)
+	delete(c.loads, member)
+	delete(c.members, member)
+	c.removeFromRing(member)
 
 	// Remap only the affected partitions with load balancing.
 	avgLoad := c.averageLoad()
@@ -414,7 +435,7 @@ func (c *Consistent) LocateReplicas(ctx context.Context, key []byte, count int) 
 	default:
 	}
 	partID := c.FindPartitionID(key)
-	return c.getClosestN(ctx, partID, count)
+	return c.getClosestN(partID, count)
 }
 
 // GetClosestN is an alias for LocateReplicas for backward compatibility.
@@ -429,7 +450,7 @@ func (c *Consistent) LocateReplicasForPartition(ctx context.Context, partID, cou
 		return nil, ctx.Err()
 	default:
 	}
-	return c.getClosestN(ctx, partID, count)
+	return c.getClosestN(partID, count)
 }
 
 // GetClosestNForPartition is an alias for LocateReplicasForPartition for backward compatibility.
@@ -438,7 +459,7 @@ func (c *Consistent) GetClosestNForPartition(ctx context.Context, partID, count 
 }
 
 // getClosestN gets the N closest members.
-func (c *Consistent) getClosestN(ctx context.Context, partID, count int) ([]string, error) {
+func (c *Consistent) getClosestN(partID, count int) ([]string, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -506,11 +527,11 @@ func (c *Consistent) GetPartitionOwner(ctx context.Context, partID int) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	return c.getPartitionOwner(ctx, partID)
+	return c.getPartitionOwner(partID)
 }
 
 // getPartitionOwner returns the owner of a given partition (not thread-safe).
-func (c *Consistent) getPartitionOwner(ctx context.Context, partID int) string {
+func (c *Consistent) getPartitionOwner(partID int) string {
 	return c.partitions[partID] // Returns empty string if not found
 }
 
@@ -622,7 +643,7 @@ func (c *Consistent) removeFromRing(name string) {
 	}
 }
 
-// buildVirtualNodeKey efficiently builds virtual node key, avoiding fmt.Sprintf performance overhead
+// buildVirtualNodeKey builds virtual node key
 func buildVirtualNodeKey(memberStr string, index int) []byte {
 	indexStr := strconv.Itoa(index)
 	key := make([]byte, 0, len(memberStr)+len(indexStr))
