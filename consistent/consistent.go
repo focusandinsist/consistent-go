@@ -81,7 +81,7 @@ type Consistent struct {
 	membersDirty  bool
 }
 
-// New creates and returns a new empty Consistent object.
+// New creates and returns a new empty Consistent object, ready for dynamic member additions.
 func New(config Config) (*Consistent, error) {
 	return NewWithMembers([]string{}, config)
 }
@@ -116,7 +116,7 @@ func NewWithMembers(members []string, config Config) (*Consistent, error) {
 
 	c := &Consistent{
 		config:              config,
-		members:             make(map[string]struct{}),
+		members:             make(map[string]struct{}, len(members)),
 		partitionCount:      uint64(config.PartitionCount),
 		ring:                make(map[uint64]string),
 		partitions:          make(map[int]string),
@@ -127,9 +127,18 @@ func NewWithMembers(members []string, config Config) (*Consistent, error) {
 	}
 
 	c.hasher = config.Hasher
+
+	// Add all virtual nodes of members, then sort the entire ring after all nodes have been added.
 	for _, member := range members {
-		c.initMember(member)
+		c.members[member] = struct{}{}
+		c.addVirtualNodes(member)
 	}
+	if len(members) > 0 {
+		sort.Slice(c.sortedSet, func(i, j int) bool {
+			return c.sortedSet[i] < c.sortedSet[j]
+		})
+	}
+
 	// Precompute partition hashes and sort them for efficient lookups.
 	bs := make([]byte, 8)
 	for partID := 0; partID < int(c.partitionCount); partID++ {
@@ -163,11 +172,16 @@ func validateConfig(memberCount int, config Config) error {
 	avgLoad := float64(config.PartitionCount) / float64(memberCount) * config.Load
 	maxLoad := math.Ceil(avgLoad)
 
-	// Rough estimation: if average load per member exceeds virtual nodes per member significantly,
-	// it might be difficult to distribute partitions
+	// Sanity check to prevent configurations that are highly likely to fail
+	// during partition distribution. This heuristic ensures the number of virtual nodes
+	// is not disproportionately small compared to the expected partition load.
 	if maxLoad > float64(config.ReplicationFactor)*2 {
-		return fmt.Errorf("configuration may cause distribution issues: partitionCount=%d, memberCount=%d, load=%g results in avgLoad=%g per member",
-			config.PartitionCount, memberCount, config.Load, maxLoad)
+		return fmt.Errorf(
+			"bad configuration: the calculated maxLoad (%g) per member is too high for the given ReplicationFactor (%d). "+
+				"This configuration is unlikely to succeed. "+
+				"Please increase ReplicationFactor or decrease PartitionCount/Load",
+			maxLoad, config.ReplicationFactor,
+		)
 	}
 
 	return nil

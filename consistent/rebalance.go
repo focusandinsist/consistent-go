@@ -8,7 +8,7 @@ import (
 	"strconv"
 )
 
-// Add adds a new member to the consistent hash ring
+// Add adds a new member to the consistent hash ring.
 func (c *Consistent) Add(ctx context.Context, member string) error {
 	select {
 	case <-ctx.Done():
@@ -32,9 +32,12 @@ func (c *Consistent) Add(ctx context.Context, member string) error {
 		return nil
 	}
 
-	// Add the member to the ring and partitions incrementally.
+	// Add the member and its virtual nodes, then sort and rebalance.
 	c.members[member] = struct{}{}
-	c.addToRing(member)
+	c.addVirtualNodes(member)
+	sort.Slice(c.sortedSet, func(i, j int) bool {
+		return c.sortedSet[i] < c.sortedSet[j]
+	})
 	c.remapPartitionsForNewMember(member)
 	c.membersDirty = true
 
@@ -60,7 +63,7 @@ func (c *Consistent) Remove(ctx context.Context, member string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Double-check if the member already exists.
+	// Double-check if the member still exists.
 	if _, ok := c.members[member]; !ok {
 		return nil
 	}
@@ -75,7 +78,7 @@ func (c *Consistent) Remove(ctx context.Context, member string) error {
 
 	delete(c.loads, member)
 	delete(c.members, member)
-	c.removeFromRing(member)
+	c.removeVirtualNodes(member)
 
 	// Remap only the affected partitions with load balancing.
 	avgLoad := c.averageLoad()
@@ -160,18 +163,15 @@ func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]stri
 	}
 }
 
-// addToRing only adds a member's virtual nodes to the ring. It does not rebalance partitions.
-func (c *Consistent) addToRing(member string) {
+// addVirtualNodes adds all virtual nodes for a given member to the ring.
+// It does NOT sort the ring, the caller is responsible for sorting.
+func (c *Consistent) addVirtualNodes(member string) {
 	for i := 0; i < c.config.ReplicationFactor; i++ {
 		key := buildVirtualNodeKey(member, i)
 		h := c.hasher.Sum64(key)
 		c.ring[h] = member
 		c.sortedSet = append(c.sortedSet, h)
 	}
-	// Sort the hash values in ascending order.
-	sort.Slice(c.sortedSet, func(i int, j int) bool {
-		return c.sortedSet[i] < c.sortedSet[j]
-	})
 }
 
 // remapPartitionsForNewMember incrementally updates the partition map when a new member is added.
@@ -245,46 +245,28 @@ func (c *Consistent) remapPartitionsForNewMember(member string) {
 	}
 }
 
-// removeFromRing only removes a member's virtual nodes from the ring. It does not rebalance partitions.
-func (c *Consistent) removeFromRing(name string) {
-	for i := 0; i < c.config.ReplicationFactor; i++ {
-		key := buildVirtualNodeKey(name, i)
-		h := c.hasher.Sum64(key)
-		delete(c.ring, h)
-		c.delSlice(h)
-	}
-}
-
-// delSlice removes a value from the slice.
-func (c *Consistent) delSlice(val uint64) {
-	// Use binary search to locate the element's position.
-	idx := sort.Search(len(c.sortedSet), func(i int) bool {
-		return c.sortedSet[i] >= val
-	})
-
-	// Check if the exact value was found.
-	if idx < len(c.sortedSet) && c.sortedSet[idx] == val {
-		// Remove the found element.
-		c.sortedSet = append(c.sortedSet[:idx], c.sortedSet[idx+1:]...)
-	}
-}
-
-// initMember adds a member to the hash ring during initialization.
-func (c *Consistent) initMember(member string) {
+// removeVirtualNodes removes all virtual nodes for a given member from the ring.
+func (c *Consistent) removeVirtualNodes(member string) {
 	for i := 0; i < c.config.ReplicationFactor; i++ {
 		key := buildVirtualNodeKey(member, i)
 		h := c.hasher.Sum64(key)
-		c.ring[h] = member
-		c.sortedSet = append(c.sortedSet, h)
+		delete(c.ring, h)
+		c.removeVirtualNode(h)
 	}
-	// Sort the hash values in ascending order.
-	sort.Slice(c.sortedSet, func(i int, j int) bool {
-		return c.sortedSet[i] < c.sortedSet[j]
-	})
-	// The members map is used for quick, O(1) lookups to check for member existence.
-	c.members[member] = struct{}{}
+}
 
-	c.membersDirty = true
+// removeVirtualNode removes a single virtual node hash from the sortedSet.
+func (c *Consistent) removeVirtualNode(vnodeHash uint64) {
+	// Use binary search to locate the element's position.
+	idx := sort.Search(len(c.sortedSet), func(i int) bool {
+		return c.sortedSet[i] >= vnodeHash
+	})
+
+	// Check if the exact value was found.
+	if idx < len(c.sortedSet) && c.sortedSet[idx] == vnodeHash {
+		// Remove the found element.
+		c.sortedSet = append(c.sortedSet[:idx], c.sortedSet[idx+1:]...)
+	}
 }
 
 // buildVirtualNodeKey builds virtual node key
