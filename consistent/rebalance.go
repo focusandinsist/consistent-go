@@ -33,12 +33,24 @@ func (c *Consistent) Add(ctx context.Context, member string) error {
 	}
 
 	// Add the member and its virtual nodes, then sort and rebalance.
+	isFirstMember := len(c.members) == 0
 	c.members[member] = struct{}{}
 	c.addVirtualNodes(member)
 	sort.Slice(c.sortedSet, func(i, j int) bool {
 		return c.sortedSet[i] < c.sortedSet[j]
 	})
-	c.remapPartitionsForNewMember(member)
+
+	if isFirstMember {
+		if err := c.distributePartitions(); err != nil {
+			// Revert if distribution fails.
+			delete(c.members, member)
+			c.removeVirtualNodes(member)
+			return fmt.Errorf("failed to distribute partitions for the first member: %w", err)
+		}
+	} else {
+		c.remapPartitionsForNewMember(member)
+	}
+
 	c.membersDirty = true
 
 	return nil
@@ -179,8 +191,11 @@ func (c *Consistent) addVirtualNodes(member string) {
 	}
 }
 
-// remapPartitionsForNewMember incrementally updates the partition map when a new member is added.
-// This is a true incremental update that respects the load factor.
+// remapPartitionsForNewMember incrementally reassigns partitions to a newly added member.
+// This is a key performance optimization. Instead of re-calculating the entire partition map,
+// it only re-evaluates partitions that fall under the new member's influence on the hash ring.
+// It also enforces the "bounded load" constraint: a partition will only be moved to the new member
+// if the member has not yet reached its maximum load capacity, preventing it from becoming a hot spot.
 func (c *Consistent) remapPartitionsForNewMember(member string) {
 	c.loads[member] = 0
 	avgLoad := c.averageLoad()
