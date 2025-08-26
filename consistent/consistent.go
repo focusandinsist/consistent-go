@@ -36,6 +36,7 @@ const (
 var (
 	ErrInsufficientMemberCount = errors.New("insufficient number of members")
 	ErrInsufficientSpace       = errors.New("not enough space to distribute partitions")
+	ErrEmptyMemberName         = errors.New("member name cannot be empty")
 )
 
 // Hasher generates a 64-bit unsigned hash for a given byte slice.
@@ -206,6 +207,9 @@ func validateConfig(memberCount int, config Config) error {
 
 // Add adds a new member to the consistent hash ring.
 func (c *Consistent) Add(ctx context.Context, member string) error {
+	if member == "" {
+		return ErrEmptyMemberName
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
