@@ -7,31 +7,14 @@ import (
 	"sort"
 )
 
-// LocateKey finds the owner for a given key.
-func (c *Consistent) LocateKey(ctx context.Context, key []byte) string {
-	select {
-	case <-ctx.Done():
-		return ""
-	default:
-	}
-	partID := c.FindPartitionID(key)
-	return c.GetPartitionOwner(ctx, partID)
-}
-
-// LocateReplicas returns the N members closest to the key in the hash ring.
-func (c *Consistent) LocateReplicas(ctx context.Context, key []byte, count int) ([]string, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-	partID := c.FindPartitionID(key)
-	return c.getClosestN(partID, count)
-}
-
 // GetClosestN is an alias for LocateReplicas for backward compatibility.
 func (c *Consistent) GetClosestN(ctx context.Context, key []byte, count int) ([]string, error) {
 	return c.LocateReplicas(ctx, key, count)
+}
+
+// GetClosestNForPartition is an alias for LocateReplicasForPartition for backward compatibility.
+func (c *Consistent) GetClosestNForPartition(ctx context.Context, partID, count int) ([]string, error) {
+	return c.LocateReplicasForPartition(ctx, partID, count)
 }
 
 // LocateReplicasForPartition returns the N closest members for a given partition.
@@ -42,11 +25,6 @@ func (c *Consistent) LocateReplicasForPartition(ctx context.Context, partID, cou
 	default:
 	}
 	return c.getClosestN(partID, count)
-}
-
-// GetClosestNForPartition is an alias for LocateReplicasForPartition for backward compatibility.
-func (c *Consistent) GetClosestNForPartition(ctx context.Context, partID, count int) ([]string, error) {
-	return c.LocateReplicasForPartition(ctx, partID, count)
 }
 
 // getClosestN gets the N closest members.
@@ -124,50 +102,6 @@ func (c *Consistent) GetPartitionOwner(ctx context.Context, partID int) string {
 // getPartitionOwner returns the owner of a given partition (not thread-safe).
 func (c *Consistent) getPartitionOwner(partID int) string {
 	return c.partitions[partID] // Returns empty string if not found
-}
-
-// GetMembers returns a thread-safe copy of the members. It returns an empty Member slice if there are no members.
-func (c *Consistent) GetMembers(ctx context.Context) []string {
-	select {
-	case <-ctx.Done():
-		return nil
-	default:
-	}
-
-	// Check the cache.
-	c.mu.RLock()
-	if !c.membersDirty && c.cachedMembers != nil {
-		// Return a copy of the cached slice.
-		res := make([]string, len(c.cachedMembers))
-		copy(res, c.cachedMembers)
-		c.mu.RUnlock()
-		return res
-	}
-	c.mu.RUnlock()
-
-	// Acquire the write lock to update the cache.
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Check again if cache was updated.
-	if !c.membersDirty && c.cachedMembers != nil {
-		res := make([]string, len(c.cachedMembers))
-		copy(res, c.cachedMembers)
-		return res
-	}
-
-	// Create a thread-safe copy of the member list.
-	members := make([]string, 0, len(c.members))
-	for member := range c.members {
-		members = append(members, member)
-	}
-
-	// Update the cache.
-	c.cachedMembers = make([]string, 0, len(members))
-	copy(c.cachedMembers, members)
-	c.membersDirty = false
-
-	return members
 }
 
 // LoadDistribution exposes the load distribution of members.

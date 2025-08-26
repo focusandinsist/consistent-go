@@ -1,6 +1,7 @@
 package consistent
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -201,4 +202,192 @@ func validateConfig(memberCount int, config Config) error {
 	}
 
 	return nil
+}
+
+// Add adds a new member to the consistent hash ring.
+func (c *Consistent) Add(ctx context.Context, member string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	// Check if the member already exists.
+	c.mu.RLock()
+	if _, ok := c.members[member]; ok {
+		c.mu.RUnlock()
+		return nil
+	}
+	c.mu.RUnlock()
+
+	// Acquire the write lock to update the ring.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Double-check if the member already exists.
+	if _, ok := c.members[member]; ok {
+		return nil
+	}
+
+	// Add the member and its virtual nodes, then sort and rebalance.
+	isFirstMember := len(c.members) == 0
+	c.members[member] = struct{}{}
+	c.addVirtualNodes(member)
+	sort.Slice(c.sortedSet, func(i, j int) bool {
+		return c.sortedSet[i] < c.sortedSet[j]
+	})
+
+	if isFirstMember {
+		if err := c.distributePartitions(); err != nil {
+			// Revert if distribution fails.
+			delete(c.members, member)
+			c.removeVirtualNodes(member)
+			return fmt.Errorf("failed to distribute partitions for the first member: %w", err)
+		}
+	} else {
+		c.remapPartitionsForNewMember(member)
+	}
+
+	c.membersDirty = true
+
+	return nil
+}
+
+// Remove removes a member from the consistent hash ring.
+func (c *Consistent) Remove(ctx context.Context, member string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	// Check if the member exists.
+	c.mu.RLock()
+	if _, ok := c.members[member]; !ok {
+		c.mu.RUnlock()
+		return nil
+	}
+	c.mu.RUnlock()
+
+	// Acquire the write lock to update the ring.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Double-check if the member still exists.
+	if _, ok := c.members[member]; !ok {
+		return nil
+	}
+
+	// Find all partitions owned by the member being removed.
+	partitionsToRemap := []int{}
+	for partID, owner := range c.partitions {
+		if owner == member {
+			partitionsToRemap = append(partitionsToRemap, partID)
+		}
+	}
+
+	delete(c.loads, member)
+	delete(c.members, member)
+	c.removeVirtualNodes(member)
+	if len(c.members) == 0 {
+		c.partitions = make(map[int]string)
+		c.membersDirty = true
+		return nil
+	}
+
+	// Remap only the affected partitions with load balancing.
+	avgLoad := c.averageLoad()
+	bs := make([]byte, 8)
+	for _, partID := range partitionsToRemap {
+		binary.LittleEndian.PutUint64(bs, uint64(partID))
+		key := c.hasher.Sum64(bs)
+
+		// Find the theoretical owner's position on the ring.
+		idx := sort.Search(len(c.sortedSet), func(i int) bool {
+			return c.sortedSet[i] >= key
+		})
+		if idx >= len(c.sortedSet) {
+			idx = 0
+		}
+
+		// Find a new owner that is not overloaded.
+		// Start searching from the theoretical owner clockwise.
+		for i := 0; i < len(c.sortedSet); i++ {
+			searchIdx := (idx + i) % len(c.sortedSet)
+			newOwner := c.ring[c.sortedSet[searchIdx]]
+
+			if c.loads[newOwner]+1 <= avgLoad {
+				c.partitions[partID] = newOwner
+				c.loads[newOwner]++
+				break // Found a new owner, move to the next partition.
+			}
+		}
+	}
+
+	c.membersDirty = true
+	return nil
+}
+
+// LocateKey finds the owner for a given key.
+func (c *Consistent) LocateKey(ctx context.Context, key []byte) string {
+	select {
+	case <-ctx.Done():
+		return ""
+	default:
+	}
+	partID := c.FindPartitionID(key)
+	return c.GetPartitionOwner(ctx, partID)
+}
+
+// LocateReplicas returns the N members closest to the key in the hash ring.
+func (c *Consistent) LocateReplicas(ctx context.Context, key []byte, count int) ([]string, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	partID := c.FindPartitionID(key)
+	return c.getClosestN(partID, count)
+}
+
+// GetMembers returns a thread-safe copy of the members. It returns an empty Member slice if there are no members.
+func (c *Consistent) GetMembers(ctx context.Context) []string {
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
+	}
+
+	// Check the cache.
+	c.mu.RLock()
+	if !c.membersDirty && c.cachedMembers != nil {
+		// Return a copy of the cached slice.
+		res := make([]string, len(c.cachedMembers))
+		copy(res, c.cachedMembers)
+		c.mu.RUnlock()
+		return res
+	}
+	c.mu.RUnlock()
+
+	// Acquire the write lock to update the cache.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check again if cache was updated.
+	if !c.membersDirty && c.cachedMembers != nil {
+		res := make([]string, len(c.cachedMembers))
+		copy(res, c.cachedMembers)
+		return res
+	}
+
+	// Create a thread-safe copy of the member list.
+	members := make([]string, 0, len(c.members))
+	for member := range c.members {
+		members = append(members, member)
+	}
+
+	// Update the cache.
+	c.cachedMembers = make([]string, 0, len(members))
+	copy(c.cachedMembers, members)
+	c.membersDirty = false
+
+	return members
 }
