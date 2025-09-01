@@ -331,10 +331,10 @@ func (c *Consistent) Remove(ctx context.Context, member string) error {
 }
 
 // LocateKey finds the owner for a given key.
-func (c *Consistent) LocateKey(ctx context.Context, key []byte) string {
+func (c *Consistent) LocateKey(ctx context.Context, key []byte) (string, error) {
 	select {
 	case <-ctx.Done():
-		return ""
+		return "", ctx.Err()
 	default:
 	}
 	partID := c.FindPartitionID(key)

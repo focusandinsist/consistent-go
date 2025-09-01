@@ -87,10 +87,10 @@ func (c *Consistent) FindPartitionID(key []byte) int {
 }
 
 // GetPartitionOwner returns the owner of a given partition.
-func (c *Consistent) GetPartitionOwner(ctx context.Context, partID int) string {
+func (c *Consistent) GetPartitionOwner(ctx context.Context, partID int) (string, error) {
 	select {
 	case <-ctx.Done():
-		return ""
+		return "", ctx.Err()
 	default:
 	}
 	c.mu.RLock()
@@ -100,8 +100,15 @@ func (c *Consistent) GetPartitionOwner(ctx context.Context, partID int) string {
 }
 
 // getPartitionOwner returns the owner of a given partition (not thread-safe).
-func (c *Consistent) getPartitionOwner(partID int) string {
-	return c.partitions[partID] // Returns empty string if not found
+func (c *Consistent) getPartitionOwner(partID int) (string, error) {
+	if len(c.members) == 0 {
+		return "", ErrInsufficientMemberCount
+	}
+	owner := c.partitions[partID]
+	if owner == "" {
+		return "", ErrInsufficientMemberCount
+	}
+	return owner, nil
 }
 
 // LoadDistribution exposes the load distribution of members.
@@ -123,16 +130,16 @@ func (c *Consistent) LoadDistribution(ctx context.Context) map[string]float64 {
 }
 
 // AverageLoad exposes the current average load.
-func (c *Consistent) AverageLoad(ctx context.Context) float64 {
+func (c *Consistent) AverageLoad(ctx context.Context) (float64, error) {
 	select {
 	case <-ctx.Done():
-		return 0
+		return 0, ctx.Err()
 	default:
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	return c.averageLoad()
+	return c.averageLoad(), nil
 }
 
 // averageLoad calculates the average load.
