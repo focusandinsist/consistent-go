@@ -117,6 +117,9 @@ func NewWithMembers(members []string, config Config) (*Consistent, error) {
 		return nil, errors.New("load must be positive")
 	}
 	// Set defaults
+	if config.Hasher == nil {
+		config.Hasher = NewDefaultHasher()
+	}
 	if config.PartitionCount == 0 {
 		config.PartitionCount = DefaultPartitionCount
 	}
@@ -179,9 +182,6 @@ func NewWithMembers(members []string, config Config) (*Consistent, error) {
 
 // validateConfig validates the configuration parameters.
 func validateConfig(memberCount int, config Config) error {
-	if config.Hasher == nil {
-		return errors.New("hasher cannot be nil")
-	}
 	if memberCount == 0 {
 		return nil // Empty ring is valid
 	}
