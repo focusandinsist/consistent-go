@@ -127,12 +127,13 @@ func (c *Consistent) remapPartitionsForNewMember(member string) {
 			if c.loads[member]+1 <= avgLoad {
 				partID := c.partitionHashes[partKey]
 				oldOwner := c.partitions[partID]
-				// Only steal the partition if it was previously owned by someone else.
-				if oldOwner != member {
+
+				// Only decrement load if there was a real previous owner
+				if oldOwner != "" {
 					c.loads[oldOwner]--
-					c.partitions[partID] = member
-					c.loads[member]++
 				}
+				c.partitions[partID] = member
+				c.loads[member]++
 			} else {
 				// The new member is overloaded, cannot take any more partitions for this vnode.
 				break
