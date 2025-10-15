@@ -314,6 +314,7 @@ func (c *Consistent) Remove(ctx context.Context, member string) error {
 
 		// Find a new owner that is not overloaded.
 		// Start searching from the theoretical owner clockwise.
+		foundNewOwner := false
 		for i := 0; i < len(c.sortedSet); i++ {
 			searchIdx := (idx + i) % len(c.sortedSet)
 			newOwner := c.ring[c.sortedSet[searchIdx]]
@@ -321,8 +322,17 @@ func (c *Consistent) Remove(ctx context.Context, member string) error {
 			if c.loads[newOwner]+1 <= avgLoad {
 				c.partitions[partID] = newOwner
 				c.loads[newOwner]++
+				foundNewOwner = true
 				break // Found a new owner, move to the next partition.
 			}
+		}
+
+		// Critical fix: If no new owner can be found, return an error to prevent partition loss.
+		// This ensures data integrity by failing the remove operation rather than silently
+		// dropping partitions, which would make keys unreachable.
+		if !foundNewOwner {
+			return fmt.Errorf("failed to remove member '%s': %w (could not reassign partition %d - all remaining nodes are at capacity)",
+				member, ErrInsufficientSpace, partID)
 		}
 	}
 
