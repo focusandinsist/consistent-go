@@ -40,8 +40,22 @@ var (
 )
 
 // Hasher generates a 64-bit unsigned hash for a given byte slice.
-// A Hasher should minimize collisions, which occur when different byte slices generate the same hash.
-// Performance is also important, so fast functions are preferred.
+// A Hasher should minimize collisions and provide high performance.
+// WARNING: On Choosing a Hash Function
+// The correctness of this consistent hashing library is EXTREMELY DEPENDENT on
+// the hash function's ability to provide a highly uniform distribution.
+//  1. **RECOMMENDED**: Use the default `xxhash` (NewDefaultHasher) or `MurmurHash3` (NewMurmurHash3Hasher).
+//     These have been rigorously tested and are known to provide excellent avalanche effects
+//     and uniform distribution for all types of inputs.
+//  2. **ABSOLUTELY DO NOT USE**: Do not use algorithms intended for error checking (e.g., `CRC64`).
+//     As proven by testing, `CRC64` produces catastrophic hash clustering when processing
+//     low-entropy, highly regular inputs (like sequential partition IDs).
+//     This leads to all partition hashes clustering together in a small range,
+//     which will DIRECTLY BREAK the incremental rebalancing (remap) logic
+//     and cause new nodes to receive zero keys.
+//  3. **CUSTOM IMPLEMENTATIONS**: If you provide a custom Hasher, you MUST be 100% certain
+//     that your algorithm provides extremely high distribution quality (e.g., passes SMHasher tests),
+//     or the library will silently fail.
 type Hasher interface {
 	Sum64([]byte) uint64
 }
