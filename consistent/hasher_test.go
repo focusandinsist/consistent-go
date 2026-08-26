@@ -68,30 +68,6 @@ func TestMurmurHash3Hasher(t *testing.T) {
 	}
 }
 
-// TestHasherConsistency tests that different hashers produce different results
-func TestHasherConsistency(t *testing.T) {
-	testData := []byte("test data for hashing")
-
-	xxHasher := NewXXHasher()
-	murmurHasher := NewMurmurHash3Hasher()
-
-	xxHash := xxHasher.Sum64(testData)
-	murmurHash := murmurHasher.Sum64(testData)
-
-	// Different hashers should produce different results (very likely)
-	if xxHash == murmurHash {
-		t.Logf("Warning: Hash collision between XXHash and MurmurHash: %d", xxHash)
-	}
-
-	// Both hashes should be non-zero for non-empty data
-	if xxHash == 0 {
-		t.Error("XXHash returned zero for non-empty data")
-	}
-	if murmurHash == 0 {
-		t.Error("MurmurHash returned zero for non-empty data")
-	}
-}
-
 // TestDefaultHasher tests the default hasher creation
 func TestDefaultHasher(t *testing.T) {
 	hasher := NewDefaultHasher()

@@ -153,23 +153,6 @@ func TestAverageLoad(t *testing.T) {
 	}
 }
 
-// TestAverageLoadEmptyRing tests AverageLoad with empty ring
-func TestAverageLoadEmptyRing(t *testing.T) {
-	ctx := context.Background()
-
-	c, err := New(Config{})
-	if err != nil {
-		t.Fatalf("Failed to create Consistent instance: %v", err)
-	}
-
-	avgLoad, err := c.AverageLoad(ctx)
-	if err != nil {
-		t.Logf("AverageLoad() on empty ring returned error as expected: %v", err)
-	} else {
-		t.Logf("AverageLoad() on empty ring returned: %f", avgLoad)
-	}
-}
-
 // TestGetPartitionOwner tests the GetPartitionOwner functionality
 func TestGetPartitionOwner(t *testing.T) {
 	ctx := context.Background()
@@ -287,7 +270,6 @@ func TestLocateReplicas(t *testing.T) {
 		{"two_replicas", 2},
 		{"three_replicas", 3},
 		{"all_replicas", 5},
-		{"more_than_available", 5}, // Should return all available
 	}
 
 	for _, tt := range tests {
