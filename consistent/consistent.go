@@ -341,7 +341,7 @@ func (c *Consistent) Remove(ctx context.Context, member string) error {
 			}
 		}
 
-		// Critical fix: If no new owner can be found, return an error to prevent partition loss.
+		// If no new owner can be found, return an error to prevent partition loss.
 		// This ensures data integrity by failing the remove operation rather than silently
 		// dropping partitions, which would make keys unreachable.
 		if !foundNewOwner {
