@@ -13,7 +13,7 @@
 
 </div>
 
-`consistent-go` is a small, concurrent-safe routing library for sharded databases, distributed caches, sticky load balancing, and stable task assignment. It combines a virtual-node hash ring with a fixed partition table and a configurable load bound, so topology changes remain observable and migration-friendly.
+`consistent-go` is a small, concurrent-safe routing library for stable task assignment, distributed-cache routing, sticky load balancing, and application-managed storage routing. It combines a virtual-node hash ring with a fixed partition table and a configurable load bound, so topology changes remain observable and migration-friendly.
 
 ## Why consistent-go?
 
@@ -129,11 +129,11 @@ Changing `PartitionCount` or `Hasher` changes key placement at scale. Treat eith
 
 | Use case | What the library provides |
 | --- | --- |
-| Database sharding | Stable partition IDs and enumerable ownership |
+| Task assignment | Predictable ownership for tenants, jobs, or queues |
 | Distributed caching | Deterministic key routing and limited remapping |
 | Sticky load balancing | Stable backend selection across membership changes |
-| Task assignment | Predictable ownership for tenants, jobs, or queues |
 | Replica planning | Ordered, unique neighboring member candidates |
+| Application-managed shard routing | Map a shard key to a stable partition and database instance |
 
 ## How is it different?
 
@@ -144,6 +144,8 @@ Changing `PartitionCount` or `Hasher` changes key placement at scale. Treat eith
 | `consistent-go` | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** |
 
 The project deliberately focuses on local routing. It does **not** provide service discovery, failure detection, consensus, network replication, or data transfer. Those responsibilities belong to the system embedding the library.
+
+> **Database scope:** `consistent-go` only calculates shard ownership. It does not split tables or collections, move data, maintain replicas, coordinate cross-shard transactions, or replace native systems such as MongoDB Sharded Clusters. It fits application-managed setups where those responsibilities already exist, especially tenant-to-database or tenant-to-cluster routing.
 
 ## Testing
 
@@ -157,7 +159,7 @@ cd ../test
 go test -short ./...
 ```
 
-The scenario suite covers database sharding, cache failover, sticky load balancing, concurrent membership changes, and long-running stability. See the [testing guide](docs/testing-guide.md) for the full layout.
+The scenario suite covers application-managed shard routing, cache failover, sticky load balancing, concurrent membership changes, and long-running stability. See the [testing guide](docs/testing-guide.md) for the full layout.
 
 ## Documentation
 
