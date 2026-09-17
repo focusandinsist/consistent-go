@@ -118,7 +118,8 @@ func New(config Config) (*Consistent, error) {
 	return NewWithMembers([]string{}, config)
 }
 
-// NewWithMembers creates and returns a new Consistent object, pre-populated with an initial list of members.
+// NewWithMembers creates a Consistent object from an initial member list.
+// Empty names are rejected and duplicate names are treated as one member.
 func NewWithMembers(members []string, config Config) (*Consistent, error) {
 	// Check config
 	if config.PartitionCount < 0 {
@@ -130,6 +131,19 @@ func NewWithMembers(members []string, config Config) (*Consistent, error) {
 	if config.Load < 0 {
 		return nil, errors.New("load must be positive")
 	}
+	uniqueMembers := make([]string, 0, len(members))
+	seenMembers := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		if member == "" {
+			return nil, ErrEmptyMemberName
+		}
+		if _, exists := seenMembers[member]; exists {
+			continue
+		}
+		seenMembers[member] = struct{}{}
+		uniqueMembers = append(uniqueMembers, member)
+	}
+	members = uniqueMembers
 	// Set defaults
 	if config.Hasher == nil {
 		config.Hasher = NewDefaultHasher()
@@ -200,19 +214,15 @@ func validateConfig(memberCount int, config Config) error {
 		return nil // Empty ring is valid
 	}
 
-	// Check if the configuration can support the required partitions
+	// Every partition needs one owner. ReplicationFactor affects placement quality,
+	// but it does not limit how many partitions a member can own.
 	avgLoad := float64(config.PartitionCount) / float64(memberCount) * config.Load
 	maxLoad := math.Ceil(avgLoad)
-
-	// Sanity check to prevent configurations that are highly likely to fail
-	// during partition distribution. This heuristic ensures the number of virtual nodes
-	// is not disproportionately small compared to the expected partition load.
-	if maxLoad > float64(config.ReplicationFactor)*2 {
+	totalCapacity := maxLoad * float64(memberCount)
+	if totalCapacity < float64(config.PartitionCount) {
 		return fmt.Errorf(
-			"bad configuration: the calculated maxLoad (%g) per member is too high for the given ReplicationFactor (%d). "+
-				"This configuration is unlikely to succeed. "+
-				"Please increase ReplicationFactor or decrease PartitionCount/Load",
-			maxLoad, config.ReplicationFactor,
+			"bad configuration: %w (partitionCount=%d, memberCount=%d, maxLoad=%g, totalCapacity=%g)",
+			ErrInsufficientSpace, config.PartitionCount, memberCount, maxLoad, totalCapacity,
 		)
 	}
 
