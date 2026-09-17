@@ -2,6 +2,7 @@ package consistent
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -366,6 +367,47 @@ func TestLocateReplicas(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLocateReplicas_PrimaryMatchesActualOwner(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewWithMembers([]string{"node1", "node2", "node3"}, Config{
+		PartitionCount:    30,
+		ReplicationFactor: 20,
+		Load:              1.0,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+
+	for partID := 0; partID < 30; partID++ {
+		owner, err := c.GetPartitionOwner(ctx, partID)
+		if err != nil {
+			t.Fatalf("GetPartitionOwner(%d) error = %v", partID, err)
+		}
+		replicas, err := c.LocateReplicasForPartition(ctx, partID, 2)
+		if err != nil {
+			t.Fatalf("LocateReplicasForPartition(%d) error = %v", partID, err)
+		}
+		if replicas[0] != owner {
+			t.Fatalf("partition %d primary = %q, want actual owner %q", partID, replicas[0], owner)
+		}
+	}
+
+	for i := 0; i < 100; i++ {
+		key := []byte(fmt.Sprintf("primary-key-%d", i))
+		owner, err := c.LocateKey(ctx, key)
+		if err != nil {
+			t.Fatalf("LocateKey(%q) error = %v", key, err)
+		}
+		replicas, err := c.LocateReplicas(ctx, key, 2)
+		if err != nil {
+			t.Fatalf("LocateReplicas(%q) error = %v", key, err)
+		}
+		if replicas[0] != owner {
+			t.Fatalf("key %q primary = %q, want actual owner %q", key, replicas[0], owner)
+		}
 	}
 }
 

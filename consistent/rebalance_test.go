@@ -2,6 +2,8 @@ package consistent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -96,6 +98,74 @@ func TestRemapPartitionsForNewMember(t *testing.T) {
 	for member, load := range finalDist {
 		if load > avgLoad*2 {
 			t.Errorf("Member %s is overloaded: %f (avg: %f)", member, load, avgLoad)
+		}
+	}
+}
+
+func TestAdd_EnforcesAverageLoadForAllMembers(t *testing.T) {
+	ctx := context.Background()
+	c, err := New(Config{
+		PartitionCount:    271,
+		ReplicationFactor: 20,
+		Load:              1.25,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	for i := 1; i <= 12; i++ {
+		member := fmt.Sprintf("node-%d", i)
+		if err := c.Add(ctx, member); err != nil {
+			t.Fatalf("Add(%q) error = %v", member, err)
+		}
+
+		maxLoad, err := c.AverageLoad(ctx)
+		if err != nil {
+			t.Fatalf("AverageLoad() after Add(%q) error = %v", member, err)
+		}
+		loads := c.LoadDistribution(ctx)
+		totalLoad := 0.0
+		for memberName, load := range loads {
+			totalLoad += load
+			if load > maxLoad {
+				t.Fatalf("load after Add(%q): %s has %v partitions, above AverageLoad %v; distribution = %v", member, memberName, load, maxLoad, loads)
+			}
+		}
+		if totalLoad != 271 {
+			t.Fatalf("total load after Add(%q) = %v, want 271; distribution = %v", member, totalLoad, loads)
+		}
+	}
+}
+
+func TestAdd_RejectsMemberWhenNewLoadLimitHasInsufficientCapacity(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewWithMembers([]string{
+		"node-1", "node-2", "node-3", "node-4", "node-5", "node-6", "node-7",
+	}, Config{
+		PartitionCount:    10,
+		ReplicationFactor: 20,
+		Load:              0.8,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+	beforeLoads := c.LoadDistribution(ctx)
+
+	err = c.Add(ctx, "node-8")
+	if !errors.Is(err, ErrInsufficientSpace) {
+		t.Fatalf("Add() error = %v, want ErrInsufficientSpace", err)
+	}
+
+	afterLoads := c.LoadDistribution(ctx)
+	if len(afterLoads) != len(beforeLoads) {
+		t.Fatalf("member count after failed Add() = %d, want %d", len(afterLoads), len(beforeLoads))
+	}
+	if _, exists := afterLoads["node-8"]; exists {
+		t.Fatal("failed Add() left node-8 in load distribution")
+	}
+	for member, wantLoad := range beforeLoads {
+		if gotLoad := afterLoads[member]; gotLoad != wantLoad {
+			t.Errorf("load for %s after failed Add() = %v, want %v", member, gotLoad, wantLoad)
 		}
 	}
 }
