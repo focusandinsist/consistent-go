@@ -2,9 +2,85 @@ package consistent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 )
+
+func TestLocateReplicasRejectsNegativeCount(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewWithMembers([]string{"node1"}, Config{
+		PartitionCount:    10,
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("LocateReplicas() panicked for negative count: %v", recovered)
+		}
+	}()
+	_, err = c.LocateReplicas(ctx, []byte("key"), -1)
+	if !errors.Is(err, ErrInvalidReplicaCount) {
+		t.Fatalf("LocateReplicas() error = %v, want ErrInvalidReplicaCount", err)
+	}
+}
+
+func TestGetMembersReturnsSortedOrder(t *testing.T) {
+	ctx := context.Background()
+	members := []string{
+		"member-09", "member-08", "member-07", "member-06", "member-05",
+		"member-04", "member-03", "member-02", "member-01", "member-00",
+	}
+	c, err := NewWithMembers(members, Config{
+		PartitionCount:    20,
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+
+	got := c.GetMembers(ctx)
+	want := []string{
+		"member-00", "member-01", "member-02", "member-03", "member-04",
+		"member-05", "member-06", "member-07", "member-08", "member-09",
+	}
+	if !equalStrings(got, want) {
+		t.Fatalf("GetMembers() = %v, want sorted members %v", got, want)
+	}
+}
+
+func TestLocateReplicasForPartitionRejectsInvalidPartition(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewWithMembers([]string{"node1"}, Config{
+		PartitionCount:    10,
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+
+	for _, partID := range []int{-1, 10, 100} {
+		_, err := c.LocateReplicasForPartition(ctx, partID, 1)
+		if !errors.Is(err, ErrInvalidPartitionID) {
+			t.Errorf("LocateReplicasForPartition(%d) error = %v, want ErrInvalidPartitionID", partID, err)
+		}
+	}
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // TestGetMembers tests the GetMembers functionality
 func TestGetMembers(t *testing.T) {
@@ -264,8 +340,8 @@ func TestGetPartitionOwnerInvalidPartition(t *testing.T) {
 
 	for _, partID := range invalidPartitions {
 		_, err := c.GetPartitionOwner(ctx, partID)
-		if err == nil {
-			t.Errorf("Expected error for invalid partition ID %d", partID)
+		if !errors.Is(err, ErrInvalidPartitionID) {
+			t.Errorf("GetPartitionOwner(%d) error = %v, want ErrInvalidPartitionID", partID, err)
 		}
 	}
 }

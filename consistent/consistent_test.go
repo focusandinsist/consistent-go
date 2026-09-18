@@ -201,6 +201,17 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNewWithMembersAllowsLastVirtualNodeAssignment(t *testing.T) {
+	_, err := NewWithMembers([]string{"node1"}, Config{
+		PartitionCount:    1,
+		ReplicationFactor: 1,
+		Load:              1,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v, want successful assignment: %v", err, err)
+	}
+}
+
 // TestNewWithMembers tests creation with initial members
 func TestNewWithMembers(t *testing.T) {
 	tests := []struct {

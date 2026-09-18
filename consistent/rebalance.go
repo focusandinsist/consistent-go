@@ -40,14 +40,7 @@ func (c *Consistent) ringIndex(key uint64) int {
 // distributeWithLoad distributes partitions based on load.
 func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]string, loads map[string]float64) error {
 	avgLoad := c.averageLoad()
-	var count int
-	for {
-		count++
-		if count >= len(c.sortedSet) {
-			// You need to reduce the partition count, increase the member count, or increase the load factor.
-			return fmt.Errorf("%w: partition %d cannot be assigned after %d attempts (avgLoad=%g, members=%d, virtualNodes=%d)",
-				ErrInsufficientSpace, partID, count, avgLoad, len(c.members), len(c.sortedSet))
-		}
+	for attempt := 0; attempt < len(c.sortedSet); attempt++ {
 		i := c.sortedSet[idx]
 		member := c.ring[i]
 		load := loads[member]
@@ -61,6 +54,9 @@ func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]stri
 			idx = 0
 		}
 	}
+	// You need to reduce the partition count, increase the member count, or increase the load factor.
+	return fmt.Errorf("%w: partition %d cannot be assigned after %d attempts (avgLoad=%g, members=%d, virtualNodes=%d)",
+		ErrInsufficientSpace, partID, len(c.sortedSet), avgLoad, len(c.members), len(c.sortedSet))
 }
 
 // addVirtualNodes adds all virtual nodes for a given member to the ring.
