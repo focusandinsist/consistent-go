@@ -1,6 +1,7 @@
 package consistent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -181,7 +182,9 @@ func TestVirtualNodeOperations(t *testing.T) {
 
 	// Test adding virtual nodes
 	initialRingSize := len(c.sortedSet)
-	c.addVirtualNodes("test-node")
+	if err := c.addVirtualNodes("test-node"); err != nil {
+		t.Fatalf("addVirtualNodes() error = %v", err)
+	}
 
 	if len(c.sortedSet) != initialRingSize+10 {
 		t.Errorf("Expected ring size to increase by 10, got %d -> %d",
@@ -256,6 +259,24 @@ func TestBuildVirtualNodeKey(t *testing.T) {
 			if string(key) == string(differentKey) {
 				t.Errorf("buildVirtualNodeKey produced same key for different vnodeIDs")
 			}
+		}
+	}
+
+	ambiguousUnderLegacyEncoding := []struct {
+		leftMember  string
+		leftIndex   int
+		rightMember string
+		rightIndex  int
+	}{
+		{leftMember: "a1", leftIndex: 0, rightMember: "a", rightIndex: 10},
+		{leftMember: "a1", leftIndex: 2, rightMember: "a", rightIndex: 12},
+	}
+	for _, pair := range ambiguousUnderLegacyEncoding {
+		left := buildVirtualNodeKey(pair.leftMember, pair.leftIndex)
+		right := buildVirtualNodeKey(pair.rightMember, pair.rightIndex)
+		if bytes.Equal(left, right) {
+			t.Errorf("buildVirtualNodeKey(%q, %d) equals buildVirtualNodeKey(%q, %d)",
+				pair.leftMember, pair.leftIndex, pair.rightMember, pair.rightIndex)
 		}
 	}
 }

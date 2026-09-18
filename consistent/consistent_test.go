@@ -2,9 +2,138 @@ package consistent
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"testing"
 )
+
+type virtualNodeCollisionHasher struct{}
+
+func (virtualNodeCollisionHasher) Sum64(key []byte) uint64 {
+	if len(key) == 8 {
+		return binary.LittleEndian.Uint64(key) + 100
+	}
+	return 1
+}
+
+func TestNewWithMembers_RejectsVirtualNodeHashCollisions(t *testing.T) {
+	tests := []struct {
+		name              string
+		members           []string
+		replicationFactor int
+	}{
+		{name: "within one member", members: []string{"node-1"}, replicationFactor: 2},
+		{name: "across members", members: []string{"node-1", "node-2"}, replicationFactor: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewWithMembers(tt.members, Config{
+				Hasher:            virtualNodeCollisionHasher{},
+				PartitionCount:    7,
+				ReplicationFactor: tt.replicationFactor,
+				Load:              2,
+			})
+			if !errors.Is(err, ErrHashCollision) {
+				t.Fatalf("NewWithMembers() error = %v, want ErrHashCollision", err)
+			}
+		})
+	}
+}
+
+type crossMemberVirtualNodeCollisionHasher struct{}
+
+func (crossMemberVirtualNodeCollisionHasher) Sum64(key []byte) uint64 {
+	value := binary.LittleEndian.Uint64(key[len(key)-8:])
+	if len(key) == 8 {
+		return value + 1000
+	}
+	return value + 100
+}
+
+func TestAdd_HashCollisionLeavesStateUnchanged(t *testing.T) {
+	ctx := context.Background()
+	c, err := New(Config{
+		Hasher:            crossMemberVirtualNodeCollisionHasher{},
+		PartitionCount:    7,
+		ReplicationFactor: 2,
+		Load:              2,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := c.Add(ctx, "node-1"); err != nil {
+		t.Fatalf("Add(node-1) error = %v", err)
+	}
+	beforeMembers := c.GetMembers(ctx)
+	beforeLoads := c.LoadDistribution(ctx)
+	beforeOwners := make([]string, 7)
+	for partID := range beforeOwners {
+		beforeOwners[partID], err = c.GetPartitionOwner(ctx, partID)
+		if err != nil {
+			t.Fatalf("GetPartitionOwner(%d) error = %v", partID, err)
+		}
+	}
+
+	err = c.Add(ctx, "node-2")
+	if !errors.Is(err, ErrHashCollision) {
+		t.Fatalf("Add(node-2) error = %v, want ErrHashCollision", err)
+	}
+	afterMembers := c.GetMembers(ctx)
+	if len(afterMembers) != len(beforeMembers) || len(afterMembers) != 1 || afterMembers[0] != beforeMembers[0] {
+		t.Fatalf("members after failed Add() = %v, want %v", afterMembers, beforeMembers)
+	}
+	afterLoads := c.LoadDistribution(ctx)
+	if len(afterLoads) != len(beforeLoads) || afterLoads["node-1"] != beforeLoads["node-1"] {
+		t.Fatalf("loads after failed Add() = %v, want %v", afterLoads, beforeLoads)
+	}
+	if _, exists := afterLoads["node-2"]; exists {
+		t.Fatal("failed Add() left node-2 in load distribution")
+	}
+	for partID, wantOwner := range beforeOwners {
+		gotOwner, err := c.GetPartitionOwner(ctx, partID)
+		if err != nil {
+			t.Fatalf("GetPartitionOwner(%d) after failed Add() error = %v", partID, err)
+		}
+		if gotOwner != wantOwner {
+			t.Errorf("owner for partition %d after failed Add() = %q, want %q", partID, gotOwner, wantOwner)
+		}
+	}
+}
+
+type partitionCollisionHasher struct {
+	fallback Hasher
+}
+
+func (h partitionCollisionHasher) Sum64(key []byte) uint64 {
+	if len(key) == 8 {
+		return 1
+	}
+	return h.fallback.Sum64(key)
+}
+
+func TestNew_RejectsPartitionHashCollisions(t *testing.T) {
+	_, err := New(Config{
+		Hasher:         partitionCollisionHasher{fallback: NewDefaultHasher()},
+		PartitionCount: 2,
+	})
+	if !errors.Is(err, ErrHashCollision) {
+		t.Fatalf("New() error = %v, want ErrHashCollision", err)
+	}
+}
+
+func TestNewWithMembers_DistinguishesVirtualNodeKeyBoundaries(t *testing.T) {
+	c, err := NewWithMembers([]string{"a1", "a"}, Config{
+		PartitionCount:    20,
+		ReplicationFactor: 13,
+		Load:              1.5,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+	if got := len(c.GetMembers(context.Background())); got != 2 {
+		t.Fatalf("member count = %d, want 2", got)
+	}
+}
 
 // TestNew tests the creation of a new Consistent instance
 func TestNew(t *testing.T) {

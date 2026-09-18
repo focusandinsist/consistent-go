@@ -37,6 +37,7 @@ var (
 	ErrInsufficientMemberCount = errors.New("insufficient number of members")
 	ErrInsufficientSpace       = errors.New("not enough space to distribute partitions")
 	ErrEmptyMemberName         = errors.New("member name cannot be empty")
+	ErrHashCollision           = errors.New("hash collision")
 )
 
 // Hasher generates a 64-bit unsigned hash for a given byte slice.
@@ -54,8 +55,9 @@ var (
 //     which will DIRECTLY BREAK the incremental rebalancing (remap) logic
 //     and cause new nodes to receive zero keys.
 //  3. **CUSTOM IMPLEMENTATIONS**: If you provide a custom Hasher, you MUST be 100% certain
-//     that your algorithm provides extremely high distribution quality (e.g., passes SMHasher tests),
-//     or the library will silently fail.
+//     that your algorithm provides extremely high distribution quality (e.g., passes SMHasher tests).
+//     Exact collisions between virtual nodes or between partitions return ErrHashCollision, but
+//     severe clustering without exact collisions can still degrade placement and rebalancing.
 type Hasher interface {
 	Sum64([]byte) uint64
 }
@@ -179,8 +181,10 @@ func NewWithMembers(members []string, config Config) (*Consistent, error) {
 
 	// Add all virtual nodes of members, then sort the entire ring after all nodes have been added.
 	for _, member := range members {
+		if err := c.addVirtualNodes(member); err != nil {
+			return nil, fmt.Errorf("failed to add member %q: %w", member, err)
+		}
 		c.members[member] = struct{}{}
-		c.addVirtualNodes(member)
 	}
 	if len(members) > 0 {
 		sort.Slice(c.sortedSet, func(i, j int) bool {
@@ -193,6 +197,10 @@ func NewWithMembers(members []string, config Config) (*Consistent, error) {
 	for partID := 0; partID < int(c.partitionCount); partID++ {
 		binary.LittleEndian.PutUint64(bs, uint64(partID))
 		partKey := c.hasher.Sum64(bs)
+		if existingPartID, exists := c.partitionHashes[partKey]; exists {
+			return nil, fmt.Errorf("%w: partitions %d and %d share hash %d",
+				ErrHashCollision, existingPartID, partID, partKey)
+		}
 		c.sortedPartitionKeys = append(c.sortedPartitionKeys, partKey)
 		c.partitionHashes[partKey] = partID
 	}
@@ -261,8 +269,10 @@ func (c *Consistent) Add(ctx context.Context, member string) error {
 
 	// Add the member and its virtual nodes, then sort and rebalance.
 	isFirstMember := len(c.members) == 0
+	if err := c.addVirtualNodes(member); err != nil {
+		return fmt.Errorf("failed to add member %q: %w", member, err)
+	}
 	c.members[member] = struct{}{}
-	c.addVirtualNodes(member)
 	sort.Slice(c.sortedSet, func(i, j int) bool {
 		return c.sortedSet[i] < c.sortedSet[j]
 	})
