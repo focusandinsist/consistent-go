@@ -47,6 +47,40 @@ func TestGetMembers(t *testing.T) {
 	}
 }
 
+func TestGetMembers_ConsecutiveCallsReturnMembers(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewWithMembers([]string{"node1", "node2", "node3"}, Config{ReplicationFactor: 100})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+
+	first := c.GetMembers(ctx)
+	second := c.GetMembers(ctx)
+
+	for call, members := range map[string][]string{"first": first, "second": second} {
+		if len(members) != 3 {
+			t.Fatalf("%s GetMembers() returned %d members, want 3: %v", call, len(members), members)
+		}
+		seen := make(map[string]bool, len(members))
+		for _, member := range members {
+			seen[member] = true
+		}
+		for _, want := range []string{"node1", "node2", "node3"} {
+			if !seen[want] {
+				t.Errorf("%s GetMembers() missing %q: %v", call, want, members)
+			}
+		}
+	}
+
+	first[0] = "mutated"
+	third := c.GetMembers(ctx)
+	for _, member := range third {
+		if member == "mutated" {
+			t.Fatal("GetMembers() returned a slice that aliases its internal cache")
+		}
+	}
+}
+
 // TestLoadDistribution tests the LoadDistribution functionality
 func TestLoadDistribution(t *testing.T) {
 	ctx := context.Background()

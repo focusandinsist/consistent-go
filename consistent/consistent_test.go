@@ -237,6 +237,86 @@ func TestRemove(t *testing.T) {
 	}
 }
 
+func TestRemove_FailureLeavesStateUnchanged(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewWithMembers([]string{"node1", "node2"}, Config{
+		PartitionCount:    10,
+		ReplicationFactor: 3,
+		Load:              0.9,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+
+	wantMembers := c.GetMembers(ctx)
+	wantLoads := c.LoadDistribution(ctx)
+	wantOwners := make(map[int]string, 10)
+	for partID := 0; partID < 10; partID++ {
+		owner, err := c.GetPartitionOwner(ctx, partID)
+		if err != nil {
+			t.Fatalf("GetPartitionOwner(%d) error = %v", partID, err)
+		}
+		wantOwners[partID] = owner
+	}
+	wantReplicas, err := c.LocateReplicas(ctx, []byte("state-check"), 2)
+	if err != nil {
+		t.Fatalf("LocateReplicas() error = %v", err)
+	}
+
+	if err := c.Remove(ctx, "node1"); err == nil {
+		t.Fatal("Remove() error = nil, want insufficient-space error")
+	}
+
+	gotMembers := c.GetMembers(ctx)
+	if len(gotMembers) != len(wantMembers) {
+		t.Fatalf("GetMembers() returned %v after failed Remove(), want %v", gotMembers, wantMembers)
+	}
+	for _, member := range wantMembers {
+		found := false
+		for _, got := range gotMembers {
+			if got == member {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("GetMembers() missing %q after failed Remove(): %v", member, gotMembers)
+		}
+	}
+
+	gotLoads := c.LoadDistribution(ctx)
+	for member, want := range wantLoads {
+		if got := gotLoads[member]; got != want {
+			t.Errorf("LoadDistribution()[%q] = %v after failed Remove(), want %v", member, got, want)
+		}
+	}
+
+	for partID, want := range wantOwners {
+		got, err := c.GetPartitionOwner(ctx, partID)
+		if err != nil {
+			t.Errorf("GetPartitionOwner(%d) after failed Remove() error = %v", partID, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("GetPartitionOwner(%d) = %q after failed Remove(), want %q", partID, got, want)
+		}
+	}
+
+	gotReplicas, err := c.LocateReplicas(ctx, []byte("state-check"), 2)
+	if err != nil {
+		t.Fatalf("LocateReplicas() after failed Remove() error = %v", err)
+	}
+	if len(gotReplicas) != len(wantReplicas) {
+		t.Fatalf("LocateReplicas() after failed Remove() = %v, want %v", gotReplicas, wantReplicas)
+	}
+	for i := range wantReplicas {
+		if gotReplicas[i] != wantReplicas[i] {
+			t.Errorf("LocateReplicas() after failed Remove() = %v, want %v", gotReplicas, wantReplicas)
+			break
+		}
+	}
+}
+
 // TestLocateKey tests key location functionality
 func TestLocateKey(t *testing.T) {
 	ctx := context.Background()

@@ -294,48 +294,78 @@ func (c *Consistent) Remove(ctx context.Context, member string) error {
 		return nil
 	}
 
+	// Work on a private copy so a failed rebalancing can leave the live state unchanged.
+	working := &Consistent{
+		config:              c.config,
+		hasher:              c.hasher,
+		partitionCount:      c.partitionCount,
+		partitionHashes:     c.partitionHashes,
+		sortedPartitionKeys: c.sortedPartitionKeys,
+		members:             make(map[string]struct{}, len(c.members)),
+		loads:               make(map[string]float64, len(c.loads)),
+		ring:                make(map[uint64]string, len(c.ring)),
+		partitions:          make(map[int]string, len(c.partitions)),
+		sortedSet:           append([]uint64(nil), c.sortedSet...),
+	}
+	for memberName := range c.members {
+		working.members[memberName] = struct{}{}
+	}
+	for memberName, load := range c.loads {
+		working.loads[memberName] = load
+	}
+	for vnodeHash, memberName := range c.ring {
+		working.ring[vnodeHash] = memberName
+	}
+	for partID, owner := range c.partitions {
+		working.partitions[partID] = owner
+	}
+
 	// Find all partitions owned by the member being removed.
 	partitionsToRemap := []int{}
-	for partID, owner := range c.partitions {
+	for partID, owner := range working.partitions {
 		if owner == member {
 			partitionsToRemap = append(partitionsToRemap, partID)
 		}
 	}
 
-	delete(c.loads, member)
-	delete(c.members, member)
-	c.removeVirtualNodes(member)
-	if len(c.members) == 0 {
+	delete(working.loads, member)
+	delete(working.members, member)
+	working.removeVirtualNodes(member)
+	if len(working.members) == 0 {
+		c.members = working.members
+		c.loads = working.loads
+		c.ring = working.ring
+		c.sortedSet = working.sortedSet
 		c.partitions = make(map[int]string)
 		c.membersDirty = true
 		return nil
 	}
 
 	// Remap only the affected partitions with load balancing.
-	avgLoad := c.averageLoad()
+	avgLoad := working.averageLoad()
 	bs := make([]byte, 8)
 	for _, partID := range partitionsToRemap {
 		binary.LittleEndian.PutUint64(bs, uint64(partID))
-		key := c.hasher.Sum64(bs)
+		key := working.hasher.Sum64(bs)
 
 		// Find the theoretical owner's position on the ring.
-		idx := sort.Search(len(c.sortedSet), func(i int) bool {
-			return c.sortedSet[i] >= key
+		idx := sort.Search(len(working.sortedSet), func(i int) bool {
+			return working.sortedSet[i] >= key
 		})
-		if idx >= len(c.sortedSet) {
+		if idx >= len(working.sortedSet) {
 			idx = 0
 		}
 
 		// Find a new owner that is not overloaded.
 		// Start searching from the theoretical owner clockwise.
 		foundNewOwner := false
-		for i := 0; i < len(c.sortedSet); i++ {
-			searchIdx := (idx + i) % len(c.sortedSet)
-			newOwner := c.ring[c.sortedSet[searchIdx]]
+		for i := 0; i < len(working.sortedSet); i++ {
+			searchIdx := (idx + i) % len(working.sortedSet)
+			newOwner := working.ring[working.sortedSet[searchIdx]]
 
-			if c.loads[newOwner]+1 <= avgLoad {
-				c.partitions[partID] = newOwner
-				c.loads[newOwner]++
+			if working.loads[newOwner]+1 <= avgLoad {
+				working.partitions[partID] = newOwner
+				working.loads[newOwner]++
 				foundNewOwner = true
 				break // Found a new owner, move to the next partition.
 			}
@@ -350,6 +380,11 @@ func (c *Consistent) Remove(ctx context.Context, member string) error {
 		}
 	}
 
+	c.members = working.members
+	c.loads = working.loads
+	c.ring = working.ring
+	c.sortedSet = working.sortedSet
+	c.partitions = working.partitions
 	c.membersDirty = true
 	return nil
 }
@@ -413,7 +448,7 @@ func (c *Consistent) GetMembers(ctx context.Context) []string {
 	}
 
 	// Update the cache.
-	c.cachedMembers = make([]string, 0, len(members))
+	c.cachedMembers = make([]string, len(members))
 	copy(c.cachedMembers, members)
 	c.membersDirty = false
 
