@@ -187,6 +187,26 @@ func TestAverageLoad(t *testing.T) {
 	}
 }
 
+func TestAverageLoad_NonDivisiblePartitionCount(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewWithMembers([]string{"node1", "node2", "node3"}, Config{
+		PartitionCount:    10,
+		ReplicationFactor: 50,
+		Load:              1.0,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+
+	avgLoad, err := c.AverageLoad(ctx)
+	if err != nil {
+		t.Fatalf("AverageLoad() error = %v", err)
+	}
+	if avgLoad != 4 {
+		t.Fatalf("AverageLoad() = %v, want 4", avgLoad)
+	}
+}
+
 // TestGetPartitionOwner tests the GetPartitionOwner functionality
 func TestGetPartitionOwner(t *testing.T) {
 	ctx := context.Background()
