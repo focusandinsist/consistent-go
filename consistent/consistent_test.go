@@ -108,7 +108,7 @@ func TestNewWithMembers(t *testing.T) {
 			name:    "empty_member_name",
 			members: []string{"node1", "", "node2"},
 			config:  Config{ReplicationFactor: 100},
-			wantErr: false, // Empty names should be filtered out during Add
+			wantErr: true,
 		},
 	}
 
@@ -123,6 +123,88 @@ func TestNewWithMembers(t *testing.T) {
 				t.Error("NewWithMembers() returned nil Consistent instance")
 			}
 		})
+	}
+}
+
+func TestNewWithMembers_RejectsEmptyMemberName(t *testing.T) {
+	_, err := NewWithMembers([]string{"node1", "", "node2"}, Config{ReplicationFactor: 100})
+	if !errors.Is(err, ErrEmptyMemberName) {
+		t.Fatalf("NewWithMembers() error = %v, want %v", err, ErrEmptyMemberName)
+	}
+}
+
+func TestNewWithMembers_DeduplicatesMembersBeforeBuildingRing(t *testing.T) {
+	const replicationFactor = 50
+	c, err := NewWithMembers([]string{"node1", "node1", "node2"}, Config{
+		PartitionCount:    20,
+		ReplicationFactor: replicationFactor,
+		Load:              1.5,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+
+	members := c.GetMembers(context.Background())
+	if len(members) != 2 {
+		t.Fatalf("GetMembers() returned %v, want 2 unique members", members)
+	}
+	if got, want := len(c.sortedSet), len(members)*replicationFactor; got != want {
+		t.Fatalf("virtual node count = %d, want %d for unique members", got, want)
+	}
+}
+
+func TestNewWithMembers_ValidatesCapacityAfterDeduplication(t *testing.T) {
+	c, err := NewWithMembers([]string{"node1", "node1", "node2"}, Config{
+		PartitionCount:    10,
+		ReplicationFactor: 100,
+		Load:              0.9,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v, want capacity validation to use unique members", err)
+	}
+	if got := len(c.GetMembers(context.Background())); got != 2 {
+		t.Fatalf("GetMembers() returned %d members, want 2", got)
+	}
+}
+
+func TestNewWithMembers_DefaultConfigMatchesDynamicAdd(t *testing.T) {
+	ctx := context.Background()
+	direct, err := NewWithMembers([]string{"node1"}, Config{})
+	if err != nil {
+		t.Fatalf("NewWithMembers() with default config error = %v", err)
+	}
+
+	dynamic, err := New(Config{})
+	if err != nil {
+		t.Fatalf("New() with default config error = %v", err)
+	}
+	if err := dynamic.Add(ctx, "node1"); err != nil {
+		t.Fatalf("Add() with default config error = %v", err)
+	}
+
+	for partID := 0; partID < DefaultPartitionCount; partID++ {
+		directOwner, err := direct.GetPartitionOwner(ctx, partID)
+		if err != nil {
+			t.Fatalf("direct GetPartitionOwner(%d) error = %v", partID, err)
+		}
+		dynamicOwner, err := dynamic.GetPartitionOwner(ctx, partID)
+		if err != nil {
+			t.Fatalf("dynamic GetPartitionOwner(%d) error = %v", partID, err)
+		}
+		if directOwner != dynamicOwner {
+			t.Fatalf("partition %d owner: direct = %q, dynamic = %q", partID, directOwner, dynamicOwner)
+		}
+	}
+}
+
+func TestNewWithMembers_RejectsInsufficientTotalCapacity(t *testing.T) {
+	_, err := NewWithMembers([]string{"node1", "node2", "node3"}, Config{
+		PartitionCount:    10,
+		ReplicationFactor: 100,
+		Load:              0.5,
+	})
+	if !errors.Is(err, ErrInsufficientSpace) {
+		t.Fatalf("NewWithMembers() error = %v, want %v", err, ErrInsufficientSpace)
 	}
 }
 
@@ -234,6 +316,86 @@ func TestRemove(t *testing.T) {
 	expectedMembers := []string{"node1", "node2"}
 	if len(members) != len(expectedMembers) {
 		t.Errorf("Expected %d members after removal, got %d", len(expectedMembers), len(members))
+	}
+}
+
+func TestRemove_FailureLeavesStateUnchanged(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewWithMembers([]string{"node1", "node2"}, Config{
+		PartitionCount:    10,
+		ReplicationFactor: 3,
+		Load:              0.9,
+	})
+	if err != nil {
+		t.Fatalf("NewWithMembers() error = %v", err)
+	}
+
+	wantMembers := c.GetMembers(ctx)
+	wantLoads := c.LoadDistribution(ctx)
+	wantOwners := make(map[int]string, 10)
+	for partID := 0; partID < 10; partID++ {
+		owner, err := c.GetPartitionOwner(ctx, partID)
+		if err != nil {
+			t.Fatalf("GetPartitionOwner(%d) error = %v", partID, err)
+		}
+		wantOwners[partID] = owner
+	}
+	wantReplicas, err := c.LocateReplicas(ctx, []byte("state-check"), 2)
+	if err != nil {
+		t.Fatalf("LocateReplicas() error = %v", err)
+	}
+
+	if err := c.Remove(ctx, "node1"); err == nil {
+		t.Fatal("Remove() error = nil, want insufficient-space error")
+	}
+
+	gotMembers := c.GetMembers(ctx)
+	if len(gotMembers) != len(wantMembers) {
+		t.Fatalf("GetMembers() returned %v after failed Remove(), want %v", gotMembers, wantMembers)
+	}
+	for _, member := range wantMembers {
+		found := false
+		for _, got := range gotMembers {
+			if got == member {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("GetMembers() missing %q after failed Remove(): %v", member, gotMembers)
+		}
+	}
+
+	gotLoads := c.LoadDistribution(ctx)
+	for member, want := range wantLoads {
+		if got := gotLoads[member]; got != want {
+			t.Errorf("LoadDistribution()[%q] = %v after failed Remove(), want %v", member, got, want)
+		}
+	}
+
+	for partID, want := range wantOwners {
+		got, err := c.GetPartitionOwner(ctx, partID)
+		if err != nil {
+			t.Errorf("GetPartitionOwner(%d) after failed Remove() error = %v", partID, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("GetPartitionOwner(%d) = %q after failed Remove(), want %q", partID, got, want)
+		}
+	}
+
+	gotReplicas, err := c.LocateReplicas(ctx, []byte("state-check"), 2)
+	if err != nil {
+		t.Fatalf("LocateReplicas() after failed Remove() error = %v", err)
+	}
+	if len(gotReplicas) != len(wantReplicas) {
+		t.Fatalf("LocateReplicas() after failed Remove() = %v, want %v", gotReplicas, wantReplicas)
+	}
+	for i := range wantReplicas {
+		if gotReplicas[i] != wantReplicas[i] {
+			t.Errorf("LocateReplicas() after failed Remove() = %v, want %v", gotReplicas, wantReplicas)
+			break
+		}
 	}
 }
 
