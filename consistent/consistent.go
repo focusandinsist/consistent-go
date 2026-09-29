@@ -38,6 +38,8 @@ var (
 	ErrInsufficientSpace       = errors.New("not enough space to distribute partitions")
 	ErrEmptyMemberName         = errors.New("member name cannot be empty")
 	ErrHashCollision           = errors.New("hash collision")
+	ErrInvalidReplicaCount     = errors.New("invalid replica count")
+	ErrInvalidPartitionID      = errors.New("invalid partition ID")
 )
 
 // Hasher generates a 64-bit unsigned hash for a given byte slice.
@@ -466,6 +468,7 @@ func (c *Consistent) GetMembers(ctx context.Context) []string {
 	for member := range c.members {
 		members = append(members, member)
 	}
+	sort.Strings(members)
 
 	// Update the cache.
 	c.cachedMembers = make([]string, len(members))
