@@ -255,6 +255,9 @@ func (c *Consistent) Add(ctx context.Context, member string) error {
 	if _, ok := c.members[member]; ok {
 		return nil
 	}
+	if err := validateConfig(len(c.members)+1, c.config); err != nil {
+		return fmt.Errorf("failed to add member %q: %w", member, err)
+	}
 
 	// Add the member and its virtual nodes, then sort and rebalance.
 	isFirstMember := len(c.members) == 0
@@ -273,6 +276,7 @@ func (c *Consistent) Add(ctx context.Context, member string) error {
 		}
 	} else {
 		c.remapPartitionsForNewMember(member)
+		c.rebalanceOverloadedMembers()
 	}
 
 	c.membersDirty = true
@@ -359,12 +363,7 @@ func (c *Consistent) Remove(ctx context.Context, member string) error {
 		key := working.hasher.Sum64(bs)
 
 		// Find the theoretical owner's position on the ring.
-		idx := sort.Search(len(working.sortedSet), func(i int) bool {
-			return working.sortedSet[i] >= key
-		})
-		if idx >= len(working.sortedSet) {
-			idx = 0
-		}
+		idx := working.ringIndex(key)
 
 		// Find a new owner that is not overloaded.
 		// Start searching from the theoretical owner clockwise.
@@ -410,7 +409,8 @@ func (c *Consistent) LocateKey(ctx context.Context, key []byte) (string, error) 
 	return c.GetPartitionOwner(ctx, partID)
 }
 
-// LocateReplicas returns the N members closest to the key in the hash ring.
+// LocateReplicas returns the key's current owner first, followed by unique
+// members found clockwise from its partition's position on the ring.
 func (c *Consistent) LocateReplicas(ctx context.Context, key []byte, count int) ([]string, error) {
 	select {
 	case <-ctx.Done():

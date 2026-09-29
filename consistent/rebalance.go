@@ -16,12 +16,7 @@ func (c *Consistent) distributePartitions() error {
 	for partID := uint64(0); partID < c.partitionCount; partID++ {
 		binary.LittleEndian.PutUint64(bs, partID)
 		key := c.hasher.Sum64(bs)
-		idx := sort.Search(len(c.sortedSet), func(i int) bool {
-			return c.sortedSet[i] >= key
-		})
-		if idx >= len(c.sortedSet) {
-			idx = 0
-		}
+		idx := c.ringIndex(key)
 		if err := c.distributeWithLoad(int(partID), idx, partitions, loads); err != nil {
 			return err
 		}
@@ -29,6 +24,18 @@ func (c *Consistent) distributePartitions() error {
 	c.partitions = partitions
 	c.loads = loads
 	return nil
+}
+
+// ringIndex returns the first virtual-node index at or after key, wrapping to
+// the start of the ring when key is greater than every virtual-node hash.
+func (c *Consistent) ringIndex(key uint64) int {
+	idx := sort.Search(len(c.sortedSet), func(i int) bool {
+		return c.sortedSet[i] >= key
+	})
+	if idx == len(c.sortedSet) {
+		return 0
+	}
+	return idx
 }
 
 // distributeWithLoad distributes partitions based on load.
@@ -82,12 +89,7 @@ func (c *Consistent) remapPartitionsForNewMember(member string) {
 		h := c.hasher.Sum64(vnodeKey)
 
 		// Find the position of the new virtual node in the sorted set.
-		idx := sort.Search(len(c.sortedSet), func(j int) bool {
-			return c.sortedSet[j] >= h
-		})
-		if idx >= len(c.sortedSet) {
-			idx = 0
-		}
+		idx := c.ringIndex(h)
 
 		// Find the predecessor virtual node to define the range of partitions to check.
 		prevIdx := idx - 1
@@ -143,6 +145,58 @@ func (c *Consistent) remapPartitionsForNewMember(member string) {
 			}
 			partIdx++
 		}
+	}
+}
+
+// rebalanceOverloadedMembers enforces the current load limit after an Add.
+// The incremental remap above only considers ranges owned by the new virtual
+// nodes, so members outside those ranges can remain above the now-lower limit.
+func (c *Consistent) rebalanceOverloadedMembers() {
+	maxLoad := c.averageLoad()
+	members := make([]string, 0, len(c.members))
+	for member := range c.members {
+		members = append(members, member)
+	}
+	sort.Strings(members)
+
+	bs := make([]byte, 8)
+	for partID := 0; partID < int(c.partitionCount); partID++ {
+		owner := c.partitions[partID]
+		if c.loads[owner] <= maxLoad {
+			continue
+		}
+
+		binary.LittleEndian.PutUint64(bs, uint64(partID))
+		partKey := c.hasher.Sum64(bs)
+		idx := c.ringIndex(partKey)
+
+		target := ""
+		for i := 0; i < len(c.sortedSet); i++ {
+			candidate := c.ring[c.sortedSet[(idx+i)%len(c.sortedSet)]]
+			if candidate != owner && c.loads[candidate]+1 <= maxLoad {
+				target = candidate
+				break
+			}
+		}
+		// Fall back to the complete member set if ring traversal did not expose
+		// an underloaded target. Sorting keeps that fallback deterministic.
+		if target == "" {
+			for _, candidate := range members {
+				if candidate != owner && c.loads[candidate]+1 <= maxLoad {
+					target = candidate
+					break
+				}
+			}
+		}
+
+		// Add validates aggregate capacity before mutating the ring, so an
+		// underloaded target must exist while any owner is overloaded.
+		if target == "" {
+			return
+		}
+		c.partitions[partID] = target
+		c.loads[owner]--
+		c.loads[target]++
 	}
 }
 

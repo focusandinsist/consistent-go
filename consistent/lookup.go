@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"math"
-	"sort"
 )
 
 // GetClosestN is an alias for LocateReplicas for backward compatibility.
@@ -17,7 +16,8 @@ func (c *Consistent) GetClosestNForPartition(ctx context.Context, partID, count 
 	return c.LocateReplicasForPartition(ctx, partID, count)
 }
 
-// LocateReplicasForPartition returns the N closest members for a given partition.
+// LocateReplicasForPartition returns the current partition owner first, followed
+// by unique members found clockwise from the partition's position on the ring.
 func (c *Consistent) LocateReplicasForPartition(ctx context.Context, partID, count int) ([]string, error) {
 	select {
 	case <-ctx.Done():
@@ -27,7 +27,7 @@ func (c *Consistent) LocateReplicasForPartition(ctx context.Context, partID, cou
 	return c.getClosestN(partID, count)
 }
 
-// getClosestN gets the N closest members.
+// getClosestN gets the primary owner and closest replica candidates.
 func (c *Consistent) getClosestN(partID, count int) ([]string, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -40,24 +40,27 @@ func (c *Consistent) getClosestN(partID, count int) ([]string, error) {
 		return nil, ErrInsufficientMemberCount
 	}
 
+	res := make([]string, 0, count)
+	if count == 0 {
+		return res, nil
+	}
+
+	primary, err := c.getPartitionOwner(partID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Hash the partition ID to find its position on the ring.
 	bs := make([]byte, 8)
 	binary.LittleEndian.PutUint64(bs, uint64(partID))
 	partKey := c.hasher.Sum64(bs)
 
-	// Use binary search to find the starting position in the sorted ring
-	startIdx := sort.Search(len(c.sortedSet), func(i int) bool {
-		return c.sortedSet[i] >= partKey
-	})
+	startIdx := c.ringIndex(partKey)
 
-	// If didn't find an exact match or went past the end, wrap around
-	if startIdx >= len(c.sortedSet) {
-		startIdx = 0
-	}
-
-	// Collect unique members by traversing the ring clockwise
-	res := make([]string, 0, count)
-	seen := make(map[string]struct{})
+	// The partition map is authoritative after load-aware placement. Return its
+	// owner first, then fill the remaining replicas by walking the ring.
+	res = append(res, primary)
+	seen := map[string]struct{}{primary: {}}
 	idx := startIdx
 
 	for len(res) < count && len(seen) < len(c.members) {
