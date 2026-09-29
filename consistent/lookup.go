@@ -3,6 +3,7 @@ package consistent
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"math"
 )
 
@@ -32,6 +33,12 @@ func (c *Consistent) getClosestN(partID, count int) ([]string, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	if count < 0 {
+		return nil, fmt.Errorf("%w: %d", ErrInvalidReplicaCount, count)
+	}
+	if err := c.validatePartitionID(partID); err != nil {
+		return nil, err
+	}
 	if count > len(c.members) {
 		return nil, ErrInsufficientMemberCount
 	}
@@ -83,6 +90,13 @@ func (c *Consistent) getClosestN(partID, count int) ([]string, error) {
 	return res, nil
 }
 
+func (c *Consistent) validatePartitionID(partID int) error {
+	if partID < 0 || uint64(partID) >= c.partitionCount {
+		return fmt.Errorf("%w: %d (partition count=%d)", ErrInvalidPartitionID, partID, c.partitionCount)
+	}
+	return nil
+}
+
 // FindPartitionID returns the partition ID for a given key.
 func (c *Consistent) FindPartitionID(key []byte) int {
 	hkey := c.hasher.Sum64(key)
@@ -104,6 +118,9 @@ func (c *Consistent) GetPartitionOwner(ctx context.Context, partID int) (string,
 
 // getPartitionOwner returns the owner of a given partition (not thread-safe).
 func (c *Consistent) getPartitionOwner(partID int) (string, error) {
+	if err := c.validatePartitionID(partID); err != nil {
+		return "", err
+	}
 	if len(c.members) == 0 {
 		return "", ErrInsufficientMemberCount
 	}

@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
-	"strconv"
 )
 
 // distributePartitions distributes the partitions.
@@ -41,14 +40,7 @@ func (c *Consistent) ringIndex(key uint64) int {
 // distributeWithLoad distributes partitions based on load.
 func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]string, loads map[string]float64) error {
 	avgLoad := c.averageLoad()
-	var count int
-	for {
-		count++
-		if count >= len(c.sortedSet) {
-			// You need to reduce the partition count, increase the member count, or increase the load factor.
-			return fmt.Errorf("%w: partition %d cannot be assigned after %d attempts (avgLoad=%g, members=%d, virtualNodes=%d)",
-				ErrInsufficientSpace, partID, count, avgLoad, len(c.members), len(c.sortedSet))
-		}
+	for attempt := 0; attempt < len(c.sortedSet); attempt++ {
 		i := c.sortedSet[idx]
 		member := c.ring[i]
 		load := loads[member]
@@ -62,17 +54,35 @@ func (c *Consistent) distributeWithLoad(partID, idx int, partitions map[int]stri
 			idx = 0
 		}
 	}
+	// You need to reduce the partition count, increase the member count, or increase the load factor.
+	return fmt.Errorf("%w: partition %d cannot be assigned after %d attempts (avgLoad=%g, members=%d, virtualNodes=%d)",
+		ErrInsufficientSpace, partID, len(c.sortedSet), avgLoad, len(c.members), len(c.sortedSet))
 }
 
 // addVirtualNodes adds all virtual nodes for a given member to the ring.
 // It does NOT sort the ring, the caller is responsible for sorting.
-func (c *Consistent) addVirtualNodes(member string) {
+func (c *Consistent) addVirtualNodes(member string) error {
+	hashes := make([]uint64, c.config.ReplicationFactor)
+	pending := make(map[uint64]int, c.config.ReplicationFactor)
 	for i := 0; i < c.config.ReplicationFactor; i++ {
 		key := buildVirtualNodeKey(member, i)
 		h := c.hasher.Sum64(key)
+		if existingMember, exists := c.ring[h]; exists {
+			return fmt.Errorf("%w: virtual node %q[%d] conflicts with member %q (hash=%d)",
+				ErrHashCollision, member, i, existingMember, h)
+		}
+		if existingIndex, exists := pending[h]; exists {
+			return fmt.Errorf("%w: virtual nodes %q[%d] and %q[%d] share hash %d",
+				ErrHashCollision, member, existingIndex, member, i, h)
+		}
+		hashes[i] = h
+		pending[h] = i
+	}
+	for _, h := range hashes {
 		c.ring[h] = member
 		c.sortedSet = append(c.sortedSet, h)
 	}
+	return nil
 }
 
 // remapPartitionsForNewMember incrementally reassigns partitions to a newly added member.
@@ -224,11 +234,13 @@ func (c *Consistent) removeVirtualNode(vnodeHash uint64) {
 	}
 }
 
-// buildVirtualNodeKey builds virtual node key
+// buildVirtualNodeKey encodes a virtual node without ambiguous field boundaries.
 func buildVirtualNodeKey(memberStr string, index int) []byte {
-	indexStr := strconv.Itoa(index)
-	key := make([]byte, 0, len(memberStr)+len(indexStr))
-	key = append(key, memberStr...)
-	key = append(key, indexStr...)
+	const headerSize = 1 + 8
+	key := make([]byte, headerSize+len(memberStr)+8)
+	key[0] = 1 // Domain tag: virtual-node keys are distinct from partition IDs.
+	binary.LittleEndian.PutUint64(key[1:headerSize], uint64(len(memberStr)))
+	copy(key[headerSize:], memberStr)
+	binary.LittleEndian.PutUint64(key[headerSize+len(memberStr):], uint64(index))
 	return key
 }
